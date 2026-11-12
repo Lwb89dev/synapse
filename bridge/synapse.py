@@ -289,7 +289,7 @@ class Hub:
                     self.emit("attention", sid, agent=meta["agent"], state=state, message=attention_message(plain))
                 if state == "working":
                     s["working_since"] = now
-                elif prev == "working" and s["working_since"] and now - s["working_since"] >= 8:
+                elif state == "idle" and prev == "working" and s["working_since"] and now - s["working_since"] >= 8:
                     self.emit("done", sid, agent=meta["agent"], state=state, message="Finished working")
                     s["working_since"] = None
         for sid in [k for k in self.snap if k not in live]:

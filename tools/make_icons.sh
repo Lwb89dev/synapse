@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Android launcher + notification icons from assets/icons/icons.png.
+# Builds the Android launcher + notification icons from assets/icons/icons.png and notification.png.
 # Needs ImageMagick. The glyph (brackets + nodes) is cut out of the artwork by colour
 # (see step 1) and re-composited on an adaptive-icon background.
 set -euo pipefail
@@ -9,9 +9,9 @@ res="$root/android/app/src/main/res"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
 # 1. glyph with soft alpha, trimmed tight.
-#    luminance: glyph >= 35% vs background <= 28%; plus red >= 250 (pink node) vs background <= 130.
-magick "$src" -crop 1010x500+120+370 +repage "$tmp/crop.png"
-magick "$tmp/crop.png" -colorspace Gray -level 30%,35.5% "$tmp/mg.png"
+#    luminance: glyph >= 40% vs background <= 25%; plus red >= 250 (pink node/connector) vs background <= 140.
+magick "$src" -crop 960x500+150+370 +repage "$tmp/crop.png"
+magick "$tmp/crop.png" -colorspace Gray -level 28%,40% "$tmp/mg.png"
 magick "$tmp/crop.png" -channel R -separate +channel -level 75%,90% "$tmp/mr.png"
 magick "$tmp/mg.png" "$tmp/mr.png" -compose Lighten -composite "$tmp/mask.png"
 magick "$tmp/crop.png" "$tmp/mask.png" -alpha off -compose CopyOpacity -composite -trim +repage "$tmp/glyph.png"
@@ -25,13 +25,18 @@ for d in "${!fg[@]}"; do
     "$res/mipmap-$d/ic_launcher_foreground.png"
 done
 
-# 3. notification small icon: white silhouette, 24dp
+# 3. notification small icon: white silhouette, 24dp. assets/icons/notification.png is a white glyph with a
+#    soft glow in its alpha channel; harden the alpha into a crisp silhouette.
+notif="$root/assets/icons/notification.png"
+magick "$notif" -alpha extract -level 55%,92% "$tmp/nmask.png"
+dims="$(magick identify -format '%wx%h' "$notif")"
+magick -size "$dims" xc:white "$tmp/nmask.png" -alpha off -compose CopyOpacity -composite -trim +repage "$tmp/notif.png"
 declare -A st=( [mdpi]=24 [hdpi]=36 [xhdpi]=48 [xxhdpi]=72 [xxxhdpi]=96 )
 for d in "${!st[@]}"; do
   s=${st[$d]}
   mkdir -p "$res/drawable-$d"
-  magick "$tmp/glyph.png" -resize "$(( s * 90 / 100 ))x" -fill white -colorize 100 \
-    -background none -gravity center -extent "${s}x${s}" "$res/drawable-$d/ic_stat_synapse.png"
+  magick "$tmp/notif.png" -resize "$(( s * 90 / 100 ))x" -background none -gravity center -extent "${s}x${s}" \
+    "$res/drawable-$d/ic_stat_synapse.png"
 done
 
 # 4. background + adaptive icon definition

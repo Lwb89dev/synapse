@@ -107,6 +107,10 @@ All endpoints need `Authorization: Bearer <token>`.
 | `DELETE /api/sessions/{id}` | kill |
 | `GET /api/events` | SSE: `state`, `attention`, `done` events (supports `Last-Event-ID`) |
 
+## Tests
+
+`python3 -m unittest bridge.test_synapse` (state detection, ANSI stripping, key whitelist, attention/done events).
+
 ## Status / known gaps (v0.1)
 
 - The screen is a polled `capture-pane` snapshot (4 Hz, full frame), not a raw PTY byte stream:
