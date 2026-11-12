@@ -1,0 +1,110 @@
+package app.synapse.remote
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.launch
+
+/**
+ * Holds an SSE connection to /api/events and raises a notification when an
+ * agent starts waiting for the user ("attention" events).
+ */
+class EventsService : Service() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var job: Job? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        createChannels()
+        val ongoing = NotificationCompat.Builder(this, CH_STATUS)
+            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setContentTitle("Synapse")
+            .setContentText("Listening to your agents")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .build()
+        ServiceCompat.startForeground(this, 1, ongoing, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+
+        job?.cancel()
+        val pair = Store(this).load()
+        if (pair == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        val client = SynapseClient(pair)
+        job = scope.launch {
+            while (true) {
+                client.events()
+                    .catch { /* fall through to retry */ }
+                    .collect { ev -> if (ev.type == "attention" || ev.type == "done") notify(ev) }
+                delay(3000)
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun notify(ev: BridgeEvent) {
+        val urgent = ev.type == "attention"
+        val open = Intent(this, MainActivity::class.java)
+            .putExtra(EXTRA_SESSION, ev.session)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val pi = PendingIntent.getActivity(
+            this, ev.session.hashCode(), open,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val who = ev.agent.ifBlank { "Agent" }
+        val n: Notification = NotificationCompat.Builder(this, if (urgent) CH_ALERT else CH_DONE)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle(if (urgent) "$who needs you" else "$who is done")
+            .setContentText(ev.message.ifBlank { ev.session })
+            .setStyle(NotificationCompat.BigTextStyle().bigText(ev.message.ifBlank { ev.session }))
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .setPriority(if (urgent) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(ev.session.hashCode(), n)
+    }
+
+    private fun createChannels() {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(CH_STATUS, "Connection", NotificationManager.IMPORTANCE_MIN))
+        nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Agent needs input", NotificationManager.IMPORTANCE_HIGH))
+        nm.createNotificationChannel(NotificationChannel(CH_DONE, "Agent finished", NotificationManager.IMPORTANCE_DEFAULT))
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    companion object {
+        const val EXTRA_SESSION = "session"
+        private const val CH_STATUS = "status"
+        private const val CH_ALERT = "alert"
+        private const val CH_DONE = "done"
+
+        fun start(ctx: Context) {
+            ctx.startForegroundService(Intent(ctx, EventsService::class.java))
+        }
+
+        fun stop(ctx: Context) {
+            ctx.stopService(Intent(ctx, EventsService::class.java))
+        }
+    }
+}

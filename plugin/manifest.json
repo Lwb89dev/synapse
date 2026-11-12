@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "synapse.remote",
+  "name": "Synapse",
+  "version": "0.1.0",
+  "author": "Synapse",
+  "license": "MIT",
+  "description": "Remote-control your terminal AI agents (Claude Code, Codex, Kimi, Grok) from an Android phone. Shows live sessions, flags the ones waiting for you, and pairs the phone with a QR code.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Synapse",
+    "description": "Sessions reachable from your phone, with a badge when an agent needs input.",
+    "category": "AI",
+    "aliases": ["synapse", "phone", "remote"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

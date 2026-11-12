@@ -1,0 +1,13 @@
+[Unit]
+Description=Synapse bridge (phone remote control for terminal AI agents)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/synapse serve
+Restart=on-failure
+RestartSec=3
+# tmux/agents are found through the interactive shell, but the server itself only needs these
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+
+[Install]
+WantedBy=default.target
