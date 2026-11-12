@@ -42,6 +42,20 @@ Phone: build and install the app (`cd android && ./gradlew :app:installDebug` wi
 adb), open it, **Scan QR**. Sessions appear; tap one for the live screen, quick keys
 (↵ Esc ↑ ↓ Tab ^C 1 2 3 y n) and a message box. You can also start sessions from the phone.
 
+### Bar widget
+
+`./install.sh` links `plugin/` into `~/.config/omarchy/plugins/`; the phone icon appears in the bar
+(red while an agent waits for you). Click it for sessions, the bridge switch and **Pair a phone**
+(QR, wiped when the popup closes). From a keybinding:
+
+```
+omarchy-shell synapse.remote toggle      # open | close | toggle | refresh | pair
+```
+
+Developing the widget: the shell watches `~/.config/omarchy/plugins` with `inotifywait -r`, which does
+not follow the symlink, and keeps compiled QML in memory, so after editing `plugin/*.qml` run
+`omarchy restart shell`. `qmllint` works with `-I <dir containing a symlink "qs" -> /usr/share/omarchy/shell>`.
+
 ### Better Claude Code alerts (optional)
 
 `synapse claude-hooks` prints a `hooks` block (Notification + Stop) to merge into

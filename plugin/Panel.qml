@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
@@ -53,7 +52,23 @@ Panel {
   }
 
   onOpenedChanged: if (!opened) clearQr()
+  // The bar sizes this slot from these; without them it collapses to 0×0 and the glyph floats off the bar.
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
   Component.onCompleted: refresh()
+
+  // omarchy-shell synapse.remote open|close|toggle|refresh|pair  (pair = open the popup and show the QR)
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.open(); root.refresh() }
+    function close(): void { root.close() }
+    function show(): void { root.open(); root.refresh() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
+    function refresh(): string { root.refresh(); return "ok" }
+    function pair(): string { root.open(); root.refresh(); root.showQr(); return "ok" }
+  }
 
   Timer {
     interval: root.opened ? 2000 : 8000
@@ -69,7 +84,7 @@ Panel {
     onExited: function(code) {
       if (code !== 0) { root.running = false; root.error = "synapse not installed?"; return }
       try {
-        var s = JSON.parse(statusOut.text)
+        const s = JSON.parse(statusOut.text)
         root.running = s.running
         root.sessions = s.sessions || []
         root.attention = s.attention || 0
@@ -100,16 +115,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    iconComponent: Component {
-      Text {
-        text: "󰄜"   // nf-md-cellphone-link
-        color: root.attention > 0 ? root.urgent : (root.running ? root.barIconColor : root.dim)
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.icon
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
-      }
-    }
+    text: "󰄜"            // nf-md-cellphone-link; the bar centres and sizes it optically
+    active: root.attention > 0   // turns urgent-red while an agent waits for you
+    dimmed: !root.running
     onPressed: function(buttonCode) { root.togglePanel() }
   }
 
@@ -157,9 +165,10 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.icon * 0.8
           }
-          Switch {
+          ToggleSwitch {
             checked: root.running
-            onToggled: root.setService(checked)
+            foreground: root.foreground
+            onToggled: root.setService(!root.running)
           }
         }
 
@@ -190,7 +199,8 @@ Panel {
             width: column.width
             spacing: Style.space(8)
             Rectangle {
-              width: Style.space(8); height: width; radius: width / 2
+              Layout.preferredWidth: Style.space(8); Layout.preferredHeight: Style.space(8)
+              radius: Style.space(4)
               color: modelData.state === "needs_input" ? root.urgent
                    : modelData.state === "working" ? "#3e9b4f" : root.dim
             }
@@ -215,6 +225,8 @@ Panel {
           width: parent.width
           text: root.qrSource === "" ? "Pair a phone…  (p)" : "Hide QR"
           enabled: root.running
+          foreground: root.foreground
+          fontFamily: root.fontFamily
           onClicked: root.qrSource === "" ? root.showQr() : root.clearQr()
         }
 
