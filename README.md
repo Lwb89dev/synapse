@@ -1,61 +1,114 @@
 # Synapse
 
 Drive your terminal AI agents — **Claude Code, Codex, Kimi, Grok**, or anything with a TUI — from an Android phone.
+An [Omarchy](https://omarchy.org) bar widget shows the sessions that need you; the Android app is a live terminal with
+one-tap answers on the notification. Works at home, over USB, or anywhere through your own Tailscale node.
+
+![The Synapse bar widget](preview.png)
 
 ```
- Omarchy desktop                                      Android
-┌───────────────────────────────┐   HTTPS + SSE   ┌────────────────┐
-│ tmux session "synapse-foo"     │◀───────────────▶│  Synapse app    │
-│   └─ claude / codex / ...     │  pinned cert +  │  sessions list │
-│ synapse serve  (bridge)        │  bearer token   │  live screen   │
-│ Quickshell bar widget (plugin)│                 │  keys + input  │
-└───────────────────────────────┘                 │  notifications │
-                                                  └────────────────┘
+ Omarchy desktop                                        Android
+┌─────────────────────────────────┐  TLS 1.3 + SSE  ┌──────────────────┐
+│ tmux session "synapse-foo"      │◀───────────────▶│  Synapse app     │
+│   └─ claude / codex / ...       │  pinned cert +  │  sessions list   │
+│ synapse serve (bridge)          │  bearer token   │  live screen     │
+│ Quickshell bar widget (plugin)  │                 │  keys + input    │
+└─────────────────────────────────┘                 │  notifications   │
+                                                    └──────────────────┘
 ```
 
-Agents run inside **tmux**. The bridge captures the pane and types keys into it, so no
-per-agent integration is needed, and you can keep working in the same session from your
-terminal (`synapse attach`, or `synapse run` attaches for you).
+Agents run inside **tmux**. The bridge captures the pane and types keys into it, so no per-agent integration is needed,
+and you can keep working in the same session from your terminal (`synapse attach`, or `synapse run` attaches for you).
 
-## Layout
+## What is in this repository
+
+This repository **is** the Omarchy plugin (`manifest.json` and `Panel.qml` in the root) and also holds the backend it
+talks to and the Android app.
 
 | Path | What |
 |---|---|
-| `bridge/synapse.py` | Bridge server + CLI. Python stdlib only (needs `tmux`, `openssl`, optional `qrencode`). |
-| `plugin/` | Omarchy Quickshell bar widget (`manifest.json`, `Panel.qml`): sessions, "needs you" badge, pairing QR, bridge on/off. |
-| `systemd/synapse.service` | User unit that runs the bridge. |
-| `android/` | Kotlin + Jetpack Compose app (`./gradlew :app:assembleDebug`). |
+| `manifest.json`, `Panel.qml` | The Omarchy bar widget: sessions, "needs you" badge, pairing QR, bridge on/off, tailnet state. |
+| `bridge/synapse.py` | Bridge server + `synapse` CLI. Python standard library only. |
+| `systemd/` | User units: `synapse.service` (bridge) and `synapse-net.service` (tailnet node, sandboxed). |
 | `tailnet/` | Go: embedded tailnet node. `cmd/synapse-net` (desktop sidecar), `jni` (Android library), `node` (shared). |
-| `install.sh` | Symlinks everything into place. |
+| `android/` | Kotlin + Jetpack Compose app (build it yourself, see below). |
+| `install.sh` | Installs / removes the backend. Asks before it does anything. |
+
+## Requirements
+
+* **Omarchy** with the Quattro shell (for the widget). The backend also runs on any Linux with systemd (user units).
+* `tmux`, `python3` (3.9+), `openssl`. Optional: `qrencode` (QR in the terminal and in the widget).
+* Optional, for the tailnet node: **Go** (to build one static binary; `mise exec go@latest` is enough) and a Tailscale account.
+* An **Android 10+** phone (arm64) for the app: install the signed APK from the Releases page, or build it yourself
+  (`android/`, JDK 17+ and the Android SDK; the tailnet library also needs Go and the NDK, see `tailnet/build-android.sh`).
+
+## Installation
+
+The widget and the backend are installed in two explicit steps; nothing runs until you say so.
+
+**1. The widget (from the Omarchy marketplace or git):**
+
+```bash
+omarchy plugin add https://github.com/Lwb89dev/synapse.git --enable
+```
+
+This only copies this repository to `~/.config/omarchy/plugins/io.github.lwb89dev.synapse/`. Until the backend exists
+the widget says so and offers a **Set up…** button.
+
+**2. The backend** — press **Set up…** in the widget, or run the installer yourself:
+
+```bash
+~/.config/omarchy/plugins/io.github.lwb89dev.synapse/install.sh
+```
+
+It prints exactly what it will do and asks for confirmation: it links the `synapse` command into `~/.local/bin`,
+installs the user units in `~/.config/systemd/user/` and starts them, and (if Go is available) builds the tailnet
+node. **No sudo, nothing outside `$HOME`, no edit to your Omarchy or Hyprland configuration** (the bar entry is added by
+`omarchy plugin enable`, i.e. by you).
+
+*From a development checkout:* `./install.sh --enable` does the same and links the checkout as the plugin.
+
+**3. The phone app** — download `synapse-<version>.apk` from the
+[Releases](https://github.com/Lwb89dev/synapse/releases) page and install it (allow installs from your browser/files
+app). It is signed with the project key: check
+`apksigner verify --print-certs` shows certificate SHA-256 `A9:97:92:9A:…:33:89:8E` (full value and file checksum are in
+the release notes). Then run `synapse pair` and scan the QR. Changes per version: [CHANGELOG.md](CHANGELOG.md).
+
+## Removal
+
+```bash
+~/.config/omarchy/plugins/io.github.lwb89dev.synapse/install.sh --uninstall   # stops/removes services, commands, units
+omarchy plugin remove io.github.lwb89dev.synapse                              # removes the widget
+```
+
+`--uninstall` keeps `~/.config/synapse` (your token, certificate and tailnet identity) so a reinstall keeps your phone
+paired; add `--purge` to delete it as well. Remove the machine from the Tailscale admin console if you used the tailnet.
 
 ## Quick start
 
 ```bash
-./install.sh --enable      # CLI, systemd user unit, bar widget
 synapse pair                # QR + certificate fingerprint (or: bar widget → Pair a phone)
 synapse run claude          # start an agent you can also drive from the phone
 ```
 
-The app is Material You (wallpaper-derived dynamic colours on Android 12+, green fallback below),
-Android 10+, with a terminal look: ANSI-coloured live screen, extra-keys bar, `❯` prompt.
-
-Phone: build and install the app (`cd android && ./gradlew :app:installDebug` with the phone on
-adb), open it, **Scan QR**. Sessions appear; tap one for the live screen, quick keys
-(↵ Esc ↑ ↓ Tab ^C 1 2 3 y n) and a message box. You can also start sessions from the phone.
+The app is Material You (wallpaper-derived dynamic colours on Android 12+, green fallback below), Android 10+, with a
+terminal look: ANSI-coloured live screen, extra-keys bar, `❯` prompt.
 
 ### Bar widget
 
-`./install.sh` links `plugin/` into `~/.config/omarchy/plugins/`; the phone icon appears in the bar
+Enable it with `omarchy plugin enable io.github.lwb89dev.synapse`; the phone icon appears in the bar
 (red while an agent waits for you). Click it for sessions, the bridge switch and **Pair a phone**
 (QR, wiped when the popup closes). From a keybinding:
 
 ```
-omarchy-shell synapse.remote toggle      # open | close | toggle | refresh | pair
+omarchy-shell synapse toggle            # open | close | toggle | refresh | pair
+omarchy-shell shell summon io.github.lwb89dev.synapse '{}'   # Omarchy's generic route also works
 ```
 
 Developing the widget: the shell watches `~/.config/omarchy/plugins` with `inotifywait -r`, which does
-not follow the symlink, and keeps compiled QML in memory, so after editing `plugin/*.qml` run
-`omarchy restart shell`. `qmllint` works with `-I <dir containing a symlink "qs" -> /usr/share/omarchy/shell>`.
+not follow a symlinked checkout, and keeps compiled QML in memory, so after editing `Panel.qml` run
+`omarchy restart shell`. `qmllint` works with `-I <dir containing a symlink "qs" -> /usr/share/omarchy/shell>`;
+`omarchy plugin validate .` checks the manifest and layout (no symlinks allowed inside the folder).
 
 ### Away from home: Tailscale built in (no VPN app, no daemon)
 

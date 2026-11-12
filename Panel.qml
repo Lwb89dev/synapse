@@ -11,9 +11,13 @@ import qs.Ui
 //   synapse pair --format svg  -> QR for pairing (shown on demand, wiped on close)
 Panel {
   id: root
-  moduleName: "synapse.remote"
-  ipcTarget: "synapse.remote"
+  moduleName: "io.github.lwb89dev.synapse"
+  ipcTarget: "synapse"
   manageIpc: false
+
+  // Where this plugin lives (the repo root): the installer sits next to Panel.qml.
+  readonly property string pluginDir: decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")).replace(/\/$/, "")
+  readonly property string installer: pluginDir + "/install.sh"
 
   readonly property string cli: Quickshell.env("HOME") + "/.local/bin/synapse"
   readonly property string qrPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/synapse-pair.svg"
@@ -23,6 +27,8 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
+  // true when ~/.local/bin/synapse is missing: only the widget is installed, not the backend yet
+  property bool backendMissing: false
   property bool running: false
   property var sessions: []
   property int attention: 0
@@ -31,7 +37,15 @@ Panel {
   property string error: ""
 
   function refresh() {
-    if (!statusProcess.running) statusProcess.running = true
+    if (!existsProcess.running && !statusProcess.running) existsProcess.running = true
+  }
+
+  // Never installs anything by itself: opens the installer in a visible terminal so you can read it first and
+  // watch it run. The path goes in as an argument ($0), never interpolated into a shell string.
+  function runInstaller() {
+    if (!/^[A-Za-z0-9_.\/-]+$/.test(root.installer)) return
+    Quickshell.execDetached(["xdg-terminal-exec", "-e", "bash", "-c",
+      "\"$0\"; echo; read -n 1 -s -r -p 'Done. Press any key to close.'", root.installer])
   }
 
   function showQr() {
@@ -59,7 +73,7 @@ Panel {
 
   Component.onCompleted: refresh()
 
-  // omarchy-shell synapse.remote open|close|toggle|refresh|pair  (pair = open the popup and show the QR)
+  // omarchy-shell synapse open|close|toggle|refresh|pair  (pair = open the popup and show the QR)
   IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open(); root.refresh() }
@@ -78,12 +92,23 @@ Panel {
     onTriggered: root.refresh()
   }
 
+  // is the backend there at all? (a widget installed with `omarchy plugin add` has no backend yet)
+  Process {
+    id: existsProcess
+    command: ["test", "-x", root.cli]
+    onExited: function(code) {
+      root.backendMissing = code !== 0
+      if (root.backendMissing) { root.running = false; root.sessions = []; root.attention = 0; root.error = ""; return }
+      statusProcess.running = true
+    }
+  }
+
   Process {
     id: statusProcess
     command: [root.cli, "status"]
     stdout: StdioCollector { id: statusOut; waitForEnd: true }
     onExited: function(code) {
-      if (code !== 0) { root.running = false; root.error = "synapse not installed?"; return }
+      if (code !== 0) { root.running = false; root.error = "the synapse command failed: run  synapse status  in a terminal"; return }
       try {
         const s = JSON.parse(statusOut.text)
         root.running = s.running
@@ -163,12 +188,14 @@ Panel {
             Layout.fillWidth: true
           }
           Text {
+            visible: !root.backendMissing
             text: root.running ? "bridge on" : "bridge off"
             color: root.running ? root.foreground : root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.icon * 0.8
           }
           ToggleSwitch {
+            visible: !root.backendMissing
             checked: root.running
             foreground: root.foreground
             onToggled: root.setService(!root.running)
@@ -184,11 +211,47 @@ Panel {
           font.family: root.fontFamily
         }
 
-        PanelSeparator { foreground: root.foreground }
+        // --- backend not installed yet: explain, and offer to run the installer in a visible terminal ---
+        Column {
+          visible: root.backendMissing
+          width: parent.width
+          spacing: Style.space(8)
+          Text {
+            width: parent.width
+            text: "Only the widget is installed. The Synapse backend (a small Python bridge, optionally a tailnet node) is not set up yet."
+            color: root.foreground
+            wrapMode: Text.Wrap
+            font.family: root.fontFamily
+          }
+          Text {
+            width: parent.width
+            text: "Nothing is installed until you run the installer. It opens in a terminal so you can watch it."
+            color: root.dim
+            wrapMode: Text.Wrap
+            font.family: root.fontFamily
+          }
+          Button {
+            width: parent.width
+            text: "Set up…"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.runInstaller()
+          }
+          Text {
+            width: parent.width
+            text: root.installer
+            color: root.dim
+            wrapMode: Text.WrapAnywhere
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.icon * 0.7
+          }
+        }
+
+        PanelSeparator { visible: !root.backendMissing; foreground: root.foreground }
 
         // embedded tailnet node (synapse-net service): state, and the sign-in link while it needs one
         RowLayout {
-          visible: root.tailnet.active === true
+          visible: !root.backendMissing && root.tailnet.active === true
           width: parent.width
           spacing: Style.space(8)
           Text {
@@ -213,7 +276,7 @@ Panel {
         }
 
         Text {
-          visible: root.running && root.sessions.length === 0
+          visible: !root.backendMissing && root.running && root.sessions.length === 0
           width: parent.width
           text: "No sessions. In a terminal:  synapse run claude"
           color: root.dim
@@ -248,9 +311,10 @@ Panel {
           }
         }
 
-        PanelSeparator { foreground: root.foreground }
+        PanelSeparator { visible: !root.backendMissing; foreground: root.foreground }
 
         Button {
+          visible: !root.backendMissing
           width: parent.width
           text: root.qrSource === "" ? "Pair a phone…  (p)" : "Hide QR"
           enabled: root.running

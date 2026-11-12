@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PREFIX = "synapse-"
 DEFAULT_PORT = 7433
 CONFIG_DIR = Path(os.environ.get("SYNAPSE_CONFIG_DIR", Path.home() / ".config" / "synapse"))

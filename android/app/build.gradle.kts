@@ -14,8 +14,8 @@ android {
         applicationId = "app.synapse.remote"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         // the embedded Tailscale node (tailnet/build-android.sh) is built for arm64 only
         ndk { abiFilters += "arm64-v8a" }
     }

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.lwb89dev.synapse",
+  "name": "Synapse",
+  "version": "0.2.0",
+  "author": "Lwb89dev",
+  "license": "MIT",
+  "description": "Control your terminal AI agents (Claude Code, Codex, Kimi, Grok) from an Android phone. Bar widget with live sessions, a \"needs you\" badge and a pairing QR; the backend and the Android app live in the same repository.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Synapse",
+    "description": "Agent sessions reachable from your phone, with a badge when one needs input; pair a phone with a QR code.",
+    "category": "AI",
+    "aliases": [
+      "synapse",
+      "phone",
+      "remote"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}
