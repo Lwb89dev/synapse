@@ -79,6 +79,7 @@ func main() {
 					return
 				}
 			}
+			log.Printf("accepted %s", c.RemoteAddr())
 			local, err := net.Dial("tcp", *target)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "bridge unreachable:", err)
