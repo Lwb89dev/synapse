@@ -1,0 +1,28 @@
+repository: https://github.com/lwb89dev/synapse
+metadata_sources:
+    - github
+
+name: Synapse
+summary: Control your terminal AI agents from your phone, end-to-end encrypted.
+description: |
+  Drive **Claude Code, Codex, Kimi, Grok** (or anything with a TUI) running on your computer from your phone.
+
+  - **Live terminal**: ANSI-coloured screen, block cursor, extra-keys bar, fit-to-phone width.
+  - **Answer from the notification**: one-tap Yes / No / Cancel when an agent asks, guarded so a late tap can never
+    answer a different question.
+  - **Works anywhere**: on your LAN, over USB, or through your **own Tailscale node built into the app**: no VPN app,
+    so it runs next to Mullvad or any other VPN.
+  - **Private by design**: TLS 1.3 with a pinned certificate, a revocable token, pairing stored in the Android
+    Keystore, screenshots blocked by default.
+
+  Needs the free Synapse backend on your computer (an Omarchy bar widget plus a small Python bridge):
+  https://github.com/Lwb89dev/synapse
+license: MIT
+website: https://github.com/Lwb89dev/synapse
+tags: [productivity, developer-tools, ai, remote-control, tailscale]
+
+icon: ./assets/icons/icons.png
+images:
+  - ./preview.png
+release_notes: ./CHANGELOG.md
+match: 'synapse-.*\.apk$'
