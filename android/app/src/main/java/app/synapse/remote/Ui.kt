@@ -60,7 +60,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -279,10 +282,9 @@ private fun NewSessionDialog(onDismiss: () -> Unit, onCreate: (String, String?) 
 // ---------------------------------------------------------------- terminal
 
 /** label -> tmux key names */
-private val EXTRA_KEYS = listOf(
-    "Esc" to "Escape", "Tab" to "Tab", "⇧Tab" to "BTab", "^C" to "C-c", "^D" to "C-d",
-    "←" to "Left", "↓" to "Down", "↑" to "Up", "→" to "Right", "↵" to "Enter",
-    "y" to "y", "n" to "n", "1" to "1", "2" to "2", "3" to "3",
+private val KEY_ROWS = listOf(
+    listOf("Esc" to "Escape", "Tab" to "Tab", "⇧Tab" to "BTab", "^C" to "C-c", "←" to "Left", "↓" to "Down", "↑" to "Up", "→" to "Right"),
+    listOf("↵" to "Enter", "y" to "y", "n" to "n", "1" to "1", "2" to "2", "3" to "3"),
 )
 
 @Composable
@@ -352,18 +354,22 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                 title = {
                     Column {
                         Text(id, maxLines = 1, style = MaterialTheme.typography.titleMedium)
+                        val sc = stateColor(screen.state)
                         Text(
-                            "${if (live) "● live" else "○ reconnecting"} · ${screen.state.replace('_', ' ')}" +
-                                if (fit && cols > 0) " · ${cols}×$FIT_ROWS" else "",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (!live) cs.error else stateColor(screen.state),
+                            buildAnnotatedString {
+                                withStyle(SpanStyle(color = if (live) cs.primary else cs.error)) {
+                                    append(if (live) "● live" else "○ offline")
+                                }
+                                withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · ") }
+                                withStyle(SpanStyle(color = sc)) { append(screen.state.replace('_', ' ')) }
+                                if (fit && cols > 0) withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · $cols×$FIT_ROWS") }
+                            },
+                            style = MaterialTheme.typography.labelSmall, maxLines = 1,
                         )
                     }
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Text("←") } },
                 actions = {
-                    TextButton(onClick = { fontSp = (fontSp - 1).coerceAtLeast(7); vm.fontSp = fontSp }) { Text("A−") }
-                    TextButton(onClick = { fontSp = (fontSp + 1).coerceAtMost(20); vm.fontSp = fontSp }) { Text("A+") }
                     Box {
                         TextButton(onClick = { menu = true }) { Text("⋮") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -371,6 +377,14 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                                 text = { Text("Fit to phone") },
                                 leadingIcon = { Checkbox(checked = fit, onCheckedChange = null) },
                                 onClick = { fit = !fit; menu = false },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Font larger  (${fontSp}sp)") },
+                                onClick = { fontSp = (fontSp + 1).coerceAtMost(20); vm.fontSp = fontSp },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Font smaller") },
+                                onClick = { fontSp = (fontSp - 1).coerceAtLeast(7); vm.fontSp = fontSp },
                             )
                             DropdownMenuItem(text = { Text("Kill session") }, onClick = { menu = false; confirmKill = true })
                         }
@@ -398,16 +412,17 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                 Text(it, color = cs.error, modifier = Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
             }
 
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                EXTRA_KEYS.forEach { (label, key) ->
-                    FilledTonalButton(
-                        onClick = { run { client.keys(id, listOf(key)) }; follow = true },
-                        modifier = Modifier.height(36.dp), contentPadding = PaddingValues(horizontal = 12.dp),
-                        shape = RoundedCornerShape(10.dp),
-                    ) { Text(label, fontFamily = Mono) }
+            Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                KEY_ROWS.forEach { keys ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        keys.forEach { (label, key) ->
+                            FilledTonalButton(
+                                onClick = { run { client.keys(id, listOf(key)) }; follow = true },
+                                modifier = Modifier.weight(1f).height(40.dp), contentPadding = PaddingValues(0.dp),
+                                shape = RoundedCornerShape(10.dp),
+                            ) { Text(label, fontFamily = Mono, fontSize = 13.sp, maxLines = 1) }
+                        }
+                    }
                 }
             }
 
