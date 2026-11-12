@@ -70,24 +70,55 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 
-private val AGENTS = listOf("claude", "codex", "kimi", "grok")
 private val Mono = FontFamily.Monospace
 
 /** Height of the virtual terminal when "fit to phone" is on; scrollback is shown above it. */
 private const val FIT_ROWS = 30
 
 @Composable
-fun SynapseApp(vm: AppViewModel, requestedSession: String?, onConsumed: () -> Unit, onPaired: () -> Unit) {
+fun SynapseApp(
+    vm: AppViewModel, requestedSession: String?, onConsumed: () -> Unit, onPaired: () -> Unit,
+    pendingPair: PairInfo?, onPendingDecision: (Boolean) -> Unit,
+) {
     val pair by vm.pair.collectAsStateWithLifecycle()
     var open by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Poll the session list only while the app is on screen.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(pair) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                vm.refresh()
+                delay(3000)
+            }
+        }
+    }
+
+    if (pendingPair != null) AlertDialog(
+        onDismissRequest = { onPendingDecision(false) },
+        title = { Text("Pair with ${pendingPair.name}?") },
+        text = {
+            Text(
+                "A link asked this app to connect to:\n${pendingPair.hosts.joinToString("\n") { "$it:${pendingPair.port}" }}\n\n" +
+                    "certificate ${pendingPair.fingerprint.take(16)}…\n\n" +
+                    "Everything you type will be sent there" +
+                    (if (pair != null) " and your current pairing will be replaced" else "") +
+                    ". Only accept if you just ran `synapse pair` and the certificate matches.",
+            )
+        },
+        confirmButton = { TextButton(onClick = { onPendingDecision(true) }) { Text("Pair") } },
+        dismissButton = { TextButton(onClick = { onPendingDecision(false) }) { Text("Cancel") } },
+    )
 
     LaunchedEffect(requestedSession) {
         if (requestedSession != null) {
@@ -189,6 +220,7 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val pair by vm.pair.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
+    val agents by vm.agents.collectAsStateWithLifecycle()
     var showNew by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
 
@@ -248,6 +280,7 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
     }
 
     if (showNew) NewSessionDialog(
+        agents = agents,
         onDismiss = { showNew = false },
         onCreate = { agent, cwd ->
             showNew = false
@@ -257,8 +290,8 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
 }
 
 @Composable
-private fun NewSessionDialog(onDismiss: () -> Unit, onCreate: (String, String?) -> Unit) {
-    var agent by remember { mutableStateOf(AGENTS.first()) }
+private fun NewSessionDialog(agents: List<String>, onDismiss: () -> Unit, onCreate: (String, String?) -> Unit) {
+    var agent by remember { mutableStateOf(agents.first()) }
     var cwd by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -266,7 +299,7 @@ private fun NewSessionDialog(onDismiss: () -> Unit, onCreate: (String, String?) 
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AGENTS.forEach { a -> FilterChip(selected = a == agent, onClick = { agent = a }, label = { Text(a) }) }
+                    agents.forEach { a -> FilterChip(selected = a == agent, onClick = { agent = a }, label = { Text(a) }) }
                 }
                 OutlinedTextField(
                     value = cwd, onValueChange = { cwd = it }, singleLine = true,
@@ -298,6 +331,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
 
     var screen by remember { mutableStateOf(Screen()) }
     var live by remember { mutableStateOf(false) }
+    var ended by remember { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
     var failure by remember { mutableStateOf<String?>(null) }
     var confirmKill by remember { mutableStateOf(false) }
@@ -322,10 +356,26 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
     // Live screen: initial snapshot, then SSE frames; reconnects forever.
     LaunchedEffect(id) {
         runCatching { client.screen(id) }.onSuccess { screen = it }
-        client.screenStream(id)
-            .onEach { live = true; failure = null }
-            .retryWhen { _, _ -> live = false; delay(2000); true }
-            .collect { screen = it }
+        while (true) {
+            try {
+                client.screenStream(id).collect { live = true; failure = null; screen = it }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // network trouble: fall through and retry
+            }
+            live = false
+            // The stream also ends cleanly when the session is gone: tell that apart from a bridge restart.
+            val gone = try {
+                client.sessions().none { it.id == id }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
+            if (gone) { ended = true; break }
+            delay(2000)
+        }
     }
 
     // Make the tmux window exactly as wide as the phone's grid, so TUIs reflow instead of overflowing.
@@ -340,12 +390,29 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
     LaunchedEffect(vscroll.value) { follow = vscroll.value >= vscroll.maxValue - 48 }
     LaunchedEffect(vscroll.maxValue) { if (follow) vscroll.scrollTo(vscroll.maxValue) }
 
-    fun run(block: suspend () -> Unit) = scope.launch { runCatching { block() }.onFailure { failure = it.message } }
+    fun run(block: suspend () -> Unit) = scope.launch {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            failure = e.message
+        }
+    }
     fun sendInput() {
         val t = input
         input = ""
-        run { client.input(id, t) }
         follow = true
+        scope.launch {
+            try {
+                client.input(id, t)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failure = e.message
+                if (input.isBlank()) input = t // don't lose what the user typed
+            }
+        }
     }
 
     Scaffold(
@@ -358,7 +425,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                         Text(
                             buildAnnotatedString {
                                 withStyle(SpanStyle(color = if (live) cs.primary else cs.error)) {
-                                    append(if (live) "● live" else "○ offline")
+                                    append(if (ended) "✗ ended" else if (live) "● live" else "○ offline")
                                 }
                                 withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · ") }
                                 withStyle(SpanStyle(color = sc)) { append(screen.state.replace('_', ' ')) }
@@ -400,7 +467,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
             ) {
                 val usablePx = with(density) { (maxWidth - 20.dp).toPx() }
                 val newCols = (usablePx / charPx).toInt()
-                if (newCols != cols) cols = newCols
+                LaunchedEffect(newCols) { cols = newCols }
                 Box(
                     Modifier.fillMaxSize().verticalScroll(vscroll).horizontalScroll(hscroll).padding(10.dp),
                 ) {
@@ -418,6 +485,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                         keys.forEach { (label, key) ->
                             FilledTonalButton(
                                 onClick = { run { client.keys(id, listOf(key)) }; follow = true },
+                                enabled = !ended,
                                 modifier = Modifier.weight(1f).height(40.dp), contentPadding = PaddingValues(0.dp),
                                 shape = RoundedCornerShape(10.dp),
                             ) { Text(label, fontFamily = Mono, fontSize = 13.sp, maxLines = 1) }
@@ -431,6 +499,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = TextFieldDefaults.colors(focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
+                enabled = !ended,
                 prefix = { Text("❯ ", color = cs.primary, fontWeight = FontWeight.Bold) },
                 placeholder = { Text("message the agent") },
                 trailingIcon = { TextButton(onClick = { sendInput() }, enabled = input.isNotBlank()) { Text("⏎") } },

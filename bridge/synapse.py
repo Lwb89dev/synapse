@@ -478,10 +478,16 @@ class Handler(BaseHTTPRequestHandler):
         self.sse_start()
         version = -1
         first = True
+        missing = 0
         while True:
             snap, new_version = HUB.wait_screen(sid, version, 15)
             if snap is None:
-                return
+                # just created: the monitor has not seen it yet; only give up if the session is really gone
+                missing += 1
+                if missing > 12 or not session_exists(sid):
+                    return
+                time.sleep(0.25)
+                continue
             if new_version != version or first:
                 self.sse("screen", snap)
                 first = False

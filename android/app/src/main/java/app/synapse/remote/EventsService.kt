@@ -27,13 +27,14 @@ import kotlinx.coroutines.launch
 class EventsService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
+    private var activePair: PairInfo? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannels()
         val ongoing = NotificationCompat.Builder(this, CH_STATUS)
-            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setSmallIcon(R.drawable.ic_stat_synapse)
             .setContentTitle("Synapse")
             .setContentText("Listening to your agents")
             .setOngoing(true)
@@ -41,12 +42,15 @@ class EventsService : Service() {
             .build()
         ServiceCompat.startForeground(this, 1, ongoing, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
 
-        job?.cancel()
         val pair = Store(this).load()
         if (pair == null) {
             stopSelf()
             return START_NOT_STICKY
         }
+        // Every Activity start calls us again: keep the live stream instead of dropping events in a reconnect gap.
+        if (pair == activePair && job?.isActive == true) return START_STICKY
+        activePair = pair
+        job?.cancel()
         val client = SynapseClient(pair)
         job = scope.launch {
             while (true) {
@@ -70,7 +74,7 @@ class EventsService : Service() {
         )
         val who = ev.agent.ifBlank { "Agent" }
         val n: Notification = NotificationCompat.Builder(this, if (urgent) CH_ALERT else CH_DONE)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setSmallIcon(R.drawable.ic_stat_synapse)
             .setContentTitle(if (urgent) "$who needs you" else "$who is done")
             .setContentText(ev.message.ifBlank { ev.session })
             .setStyle(NotificationCompat.BigTextStyle().bigText(ev.message.ifBlank { ev.session }))

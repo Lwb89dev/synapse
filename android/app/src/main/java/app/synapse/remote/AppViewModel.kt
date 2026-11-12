@@ -3,7 +3,6 @@ package app.synapse.remote
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -23,29 +22,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var client: SynapseClient? = _pair.value?.let(::SynapseClient)
         private set
 
-    init {
-        viewModelScope.launch {
-            while (true) {
-                refresh()
-                delay(3000)
-            }
-        }
-    }
+    private val _agents = MutableStateFlow(listOf("claude", "codex", "kimi", "grok"))
+    val agents: StateFlow<List<String>> = _agents
 
     fun setPair(p: PairInfo?) {
         store.save(p)
         _pair.value = p
         client = p?.let(::SynapseClient)
+        agentsLoaded = false
         _sessions.value = emptyList()
         _error.value = null
         if (p != null) viewModelScope.launch { refresh() }
     }
 
+    private var agentsLoaded = false
+
+    /** Called by the UI only while it is visible (see SynapseApp): no polling in the background. */
     suspend fun refresh() {
         val c = client ?: return
         runCatching { c.sessions() }
-            .onSuccess { _sessions.value = it; _error.value = null }
-            .onFailure { _error.value = it.message ?: it.javaClass.simpleName }
+            .onSuccess {
+                if (c === client) { _sessions.value = it; _error.value = null }
+            }
+            .onFailure { if (c === client) _error.value = it.message ?: it.javaClass.simpleName }
+        if (!agentsLoaded && _error.value == null) {
+            runCatching { c.agents() }.onSuccess { if (it.isNotEmpty() && c === client) { _agents.value = it; agentsLoaded = true } }
+        }
     }
 
     fun create(agent: String, cwd: String?, name: String?, onDone: (Session) -> Unit) {

@@ -39,21 +39,20 @@ data class PairInfo(
     val name: String,
 ) {
     companion object {
+        private val HOST_RE = Regex("^[A-Za-z0-9.\\-:]{1,253}$")
+        private val FP_RE = Regex("^[0-9a-f]{64}$")
+
         /** synapse://pair?hosts=a,b&port=7433&token=...&fp=<sha256 hex>&name=<host> */
         fun parse(raw: String): PairInfo? = runCatching {
             val u = Uri.parse(raw.trim())
             if (u.scheme != "synapse") return null
-            val hosts = u.getQueryParameter("hosts")?.split(",")?.filter { it.isNotBlank() }.orEmpty()
-            val token = u.getQueryParameter("token") ?: return null
-            val fp = u.getQueryParameter("fp") ?: return null
-            if (hosts.isEmpty()) return null
-            PairInfo(
-                hosts = hosts,
-                port = u.getQueryParameter("port")?.toIntOrNull() ?: 7433,
-                token = token,
-                fingerprint = fp.replace(":", "").lowercase(),
-                name = u.getQueryParameter("name") ?: hosts.first(),
-            )
+            val hosts = u.getQueryParameter("hosts")?.split(",")?.map { it.trim() }
+                ?.filter { HOST_RE.matches(it) }.orEmpty()
+            val token = u.getQueryParameter("token")?.takeIf { it.isNotBlank() } ?: return null
+            val fp = u.getQueryParameter("fp")?.replace(":", "")?.lowercase() ?: return null
+            val port = u.getQueryParameter("port")?.toIntOrNull() ?: 7433
+            if (hosts.isEmpty() || port !in 1..65535 || !FP_RE.matches(fp)) return null
+            PairInfo(hosts, port, token, fp, (u.getQueryParameter("name") ?: hosts.first()).take(64))
         }.getOrNull()
     }
 }
