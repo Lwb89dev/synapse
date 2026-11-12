@@ -81,6 +81,18 @@ the first attempt under Mullvad). Android quirks handled in `tailnet/jni`: no ne
 no log dir (`TS_LOGS_DIR`), 16 kB-aligned ELF for Android 15+/Pixel 10. Building needs Go (`mise exec go@latest` works)
 and the Android NDK; the APK gains ~22 MB (arm64 only). Tailscale's code is BSD-3-Clause.
 
+### Answer from the notification
+
+When an agent waits for you, the notification can carry **one-tap answers** chosen by the bridge from the prompt on
+screen: `Yes` / `No` for `(y/n)`-style questions (types `y`/`n` + Enter), and `Yes` / `Cancel` for a menu whose
+highlighted option is "Yes" (Enter / Esc). Anything it cannot answer unambiguously gets no button: open the app.
+
+Safety: every button carries the id of the attention event, and the bridge refuses (HTTP 409, nothing typed) unless
+that same prompt is still pending (same event, still waiting, same prompt lines). So a late tap, after you answered on
+the desktop or the agent moved on to another question, cannot answer the wrong one; the notification then says
+"Already handled, nothing was sent." The buttons are executed by the foreground service, over whatever path reached
+the desktop (LAN, USB or tailnet).
+
 ### Better Claude Code alerts (optional)
 
 `synapse claude-hooks` prints a `hooks` block (Notification + Stop) to merge into

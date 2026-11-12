@@ -32,6 +32,55 @@ class Helpers(unittest.TestCase):
         self.assertEqual(syn.detect_state("$ ", False), "idle")
 
 
+class QuickActions(unittest.TestCase):
+    YN = "deploying…\n\nDo you want to proceed with the deploy? (y/n)\n"
+    MENU = "Do you want to run this command?\n❯\xa01. Yes\n  2. Yes, and don't ask again\n  3. No\n\nEsc to cancel"
+    MENU_NO = "Choose:\n  1. Yes\n❯ 2. No\n\nEsc to cancel"
+
+    def test_yes_no_prompt(self):
+        a = syn.prompt_actions(self.YN)
+        self.assertEqual([x["label"] for x in a], ["Yes", "No"])
+        self.assertEqual(a[0]["keys"], ["y", "Enter"])
+
+    def test_menu_with_yes_highlighted(self):
+        a = syn.prompt_actions(self.MENU)
+        self.assertEqual([(x["label"], x["keys"]) for x in a], [("Yes", ["Enter"]), ("Cancel", ["Escape"])])
+
+    def test_no_one_tap_when_highlighted_option_is_not_yes_or_unknown_prompt(self):
+        self.assertEqual(syn.prompt_actions(self.MENU_NO), [])
+        self.assertEqual(syn.prompt_actions("$ ls\nfile.txt\n"), [])
+
+    def test_prompt_sig_ignores_redrawn_status_lines(self):
+        a = syn.prompt_sig(self.YN + "status 1s")
+        b = syn.prompt_sig(self.YN + "status 2s")
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, syn.prompt_sig(self.YN.replace("deploy", "rollback")))
+
+
+class AttentionGuard(unittest.TestCase):
+    def hub_with(self, text, state="needs_input"):
+        hub = syn.Hub()
+        hub.snap["a"] = {"text": text, "state": state, "agent": "x", "version": 1}
+        return hub
+
+    def test_current_then_stale(self):
+        hub = self.hub_with("Proceed? (y/n)")
+        hub.emit_attention("a", "x", "Proceed? (y/n)", "Proceed? (y/n)")
+        eid = hub.snap["a"]["attention_id"]
+        self.assertTrue(hub.attention_current("a", eid))
+        hub.snap["a"]["state"] = "working"            # answered on the desktop
+        self.assertFalse(hub.attention_current("a", eid))
+        hub.snap["a"]["state"] = "needs_input"
+        hub.snap["a"]["text"] = "Delete everything? (y/n)"  # a different prompt took its place
+        self.assertFalse(hub.attention_current("a", eid))
+        self.assertFalse(hub.attention_current("a", eid + 1))
+
+    def test_event_carries_actions(self):
+        hub = self.hub_with("Proceed? (y/n)")
+        hub.emit_attention("a", "x", "m", "Proceed? (y/n)")
+        self.assertEqual(hub.events[-1]["actions"][0]["keys"], ["y", "Enter"])
+
+
 class Tailscale(unittest.TestCase):
     def test_parse_status(self):
         raw = '{"Self": {"DNSName": "omarchy.tail1234.ts.net.", "TailscaleIPs": ["100.64.0.7", "fd7a::7"]}}'

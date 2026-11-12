@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,6 +29,7 @@ class EventsService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     private var activePair: PairInfo? = null
+    private var activeClient: SynapseClient? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -48,11 +50,14 @@ class EventsService : Service() {
             return START_NOT_STICKY
         }
         Tailnet.ensure(this, pair) // the node must live as long as this service does
+        if (intent?.action == ACTION_KEYS) {
+            runQuickAction(activeClient ?: SynapseClient(pair).also { activeClient = it }, intent)
+        }
         // Every Activity start calls us again: keep the live stream instead of dropping events in a reconnect gap.
         if (pair == activePair && job?.isActive == true) return START_STICKY
         activePair = pair
         job?.cancel()
-        val client = SynapseClient(pair)
+        val client = SynapseClient(pair).also { activeClient = it }
         val store = Store(this)
         job = scope.launch {
             var last = store.lastEventId.takeIf { it > 0 }
@@ -84,15 +89,16 @@ class EventsService : Service() {
 
     private fun notify(ev: BridgeEvent) {
         val urgent = ev.type == "attention"
+        val nid = ev.session.hashCode()
         val open = Intent(this, MainActivity::class.java)
             .putExtra(EXTRA_SESSION, ev.session)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         val pi = PendingIntent.getActivity(
-            this, ev.session.hashCode(), open,
+            this, nid, open,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val who = ev.agent.ifBlank { "Agent" }
-        val n: Notification = NotificationCompat.Builder(this, if (urgent) CH_ALERT else CH_DONE)
+        val builder = NotificationCompat.Builder(this, if (urgent) CH_ALERT else CH_DONE)
             .setSmallIcon(R.drawable.ic_stat_synapse)
             .setContentTitle(if (urgent) "$who needs you" else "$who is done")
             .setContentText(ev.message.ifBlank { ev.session })
@@ -100,8 +106,61 @@ class EventsService : Service() {
             .setContentIntent(pi)
             .setAutoCancel(true)
             .setPriority(if (urgent) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+        if (urgent) {
+            // one-tap answers chosen by the bridge for the prompt on screen; each carries the event id so a late tap
+            // on a prompt that has since changed is refused by the bridge instead of answering the wrong question
+            ev.actions.filter { it.keys.isNotEmpty() }.take(2).forEachIndexed { i, a ->
+                val act = Intent(this, EventsService::class.java).setAction(ACTION_KEYS)
+                    .putExtra(EXTRA_SESSION, ev.session)
+                    .putExtra(EXTRA_KEYS, a.keys.toTypedArray())
+                    .putExtra(EXTRA_ATTENTION, ev.id)
+                    .putExtra(EXTRA_NID, nid)
+                    .putExtra(EXTRA_LABEL, a.label)
+                val api = PendingIntent.getForegroundService(
+                    this, nid * 31 + i + 1, act,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+                builder.addAction(0, a.label, api)
+            }
+        }
+        getSystemService(NotificationManager::class.java).notify(nid, builder.build())
+    }
+
+    /** Runs a notification action: types the keys, then clears the notification or says why nothing was sent. */
+    private fun runQuickAction(client: SynapseClient, intent: Intent) {
+        val session = intent.getStringExtra(EXTRA_SESSION) ?: return
+        val keys = intent.getStringArrayExtra(EXTRA_KEYS)?.toList() ?: return
+        val attention = intent.getLongExtra(EXTRA_ATTENTION, 0L)
+        val nid = intent.getIntExtra(EXTRA_NID, session.hashCode())
+        val label = intent.getStringExtra(EXTRA_LABEL) ?: "answer"
+        scope.launch {
+            val nm = getSystemService(NotificationManager::class.java)
+            try {
+                client.keys(session, keys, attention.takeIf { it > 0 })
+                nm.cancel(nid)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ApiException) {
+                showResult(nid, session, if (e.code == 409) "Already handled, nothing was sent." else "Couldn't send \"$label\": ${e.message}")
+            } catch (e: Exception) {
+                showResult(nid, session, "Couldn't reach the desktop: ${e.message}")
+            }
+        }
+    }
+
+    private fun showResult(nid: Int, session: String, text: String) {
+        val open = Intent(this, MainActivity::class.java).putExtra(EXTRA_SESSION, session)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val n = NotificationCompat.Builder(this, CH_DONE)
+            .setSmallIcon(R.drawable.ic_stat_synapse)
+            .setContentTitle(session)
+            .setContentText(text)
+            .setContentIntent(PendingIntent.getActivity(this, nid, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setTimeoutAfter(20_000)
             .build()
-        getSystemService(NotificationManager::class.java).notify(ev.session.hashCode(), n)
+        getSystemService(NotificationManager::class.java).notify(nid, n)
     }
 
     private fun createChannels() {
@@ -118,6 +177,11 @@ class EventsService : Service() {
 
     companion object {
         const val EXTRA_SESSION = "session"
+        const val ACTION_KEYS = "app.synapse.remote.KEYS"
+        const val EXTRA_KEYS = "keys"
+        const val EXTRA_ATTENTION = "attention"
+        const val EXTRA_NID = "nid"
+        const val EXTRA_LABEL = "label"
         private const val CH_STATUS = "status"
         private const val CH_ALERT = "alert"
         private const val CH_DONE = "done"

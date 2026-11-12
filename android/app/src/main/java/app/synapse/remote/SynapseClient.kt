@@ -186,8 +186,15 @@ class SynapseClient(private val pair: PairInfo) {
         inputLock.withLock { call("POST", "/api/sessions/$id/input", body) { } }
     }
 
-    suspend fun keys(id: String, keys: List<String>) {
-        val body = buildJsonObject { put("keys", JsonArray(keys.map(::JsonPrimitive))) }.toString()
+    /**
+     * [ifAttention]: only send if that attention event is still the pending prompt; otherwise the bridge answers
+     * 409 and nothing is typed (a notification action must never answer a prompt the user did not see).
+     */
+    suspend fun keys(id: String, keys: List<String>, ifAttention: Long? = null) {
+        val body = buildJsonObject {
+            put("keys", JsonArray(keys.map(::JsonPrimitive)))
+            if (ifAttention != null) put("if_attention", ifAttention)
+        }.toString()
         inputLock.withLock { call("POST", "/api/sessions/$id/keys", body) { } }
     }
 

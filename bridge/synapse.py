@@ -235,6 +235,28 @@ def detect_state(text: str, recently_changed: bool) -> str:
     return "idle"
 
 
+YN_RE = re.compile(r"\(y/n\)|\[y/N\]|\[Y/n\]|\(yes/no\)|\[yes/no\]", re.I)
+MENU_YES_RE = re.compile(r"^\s*[❯›>]\s*\d\.\s*Yes\b", re.M | re.I)
+
+
+def prompt_actions(plain: str) -> list[dict]:
+    """One-tap answers a notification may offer for the prompt currently on screen. Deliberately conservative:
+    only prompts whose answer is unambiguous; anything else gets no quick action (open the app)."""
+    tail = "\n".join(tail_lines(plain))
+    if YN_RE.search(tail):
+        return [{"label": "Yes", "keys": ["y", "Enter"]}, {"label": "No", "keys": ["n", "Enter"]}]
+    if MENU_YES_RE.search(tail) and re.search(r"esc to cancel", tail, re.I):
+        # a menu whose highlighted option is "Yes" (Claude Code style): Enter accepts it, Esc cancels
+        return [{"label": "Yes", "keys": ["Enter"]}, {"label": "Cancel", "keys": ["Escape"]}]
+    return []
+
+
+def prompt_sig(plain: str) -> str:
+    """Fingerprint of the prompt lines only (a status line that keeps redrawing must not change it)."""
+    lines = [l.strip() for l in tail_lines(plain) if NEEDS_RE.search(l)]
+    return hashlib.sha1("\n".join(lines).encode()).hexdigest()
+
+
 def attention_message(text: str) -> str:
     for l in reversed(tail_lines(text)):
         if NEEDS_RE.search(l):
@@ -255,13 +277,31 @@ class Hub:
         self.next_id = int(time.time() * 1000)  # monotonic across bridge restarts: clients can resume with Last-Event-ID
         self.version = 0
 
-    def emit(self, type_: str, session: str, **kw) -> None:
+    def emit(self, type_: str, session: str, **kw) -> dict:
         with self.cv:
             ev = {"id": self.next_id, "type": type_, "session": session, "ts": time.time(), **kw}
             self.next_id += 1
             self.events.append(ev)
             del self.events[:-200]
             self.cv.notify_all()
+            return ev
+
+    def emit_attention(self, sid: str, agent: str, message: str, plain: str) -> None:
+        """An attention event with the one-tap answers valid for the prompt on screen right now."""
+        ev = self.emit("attention", sid, agent=agent, state="needs_input", message=message,
+                       actions=prompt_actions(plain))
+        with self.cv:
+            s = self.snap.get(sid)
+            if s is not None:
+                s["attention_id"], s["attention_sig"] = ev["id"], prompt_sig(plain)
+
+    def attention_current(self, sid: str, event_id: int) -> bool:
+        """Is `event_id` still the pending prompt of the session (same event, still waiting, same prompt)?"""
+        with self.cv:
+            s = self.snap.get(sid)
+            if not s or s.get("attention_id") != event_id or s.get("state") != "needs_input":
+                return False
+            return s.get("attention_sig") == prompt_sig(strip_ansi(s.get("text", "")))
 
     def run(self) -> None:
         while True:
@@ -300,7 +340,7 @@ class Hub:
             if state != prev:
                 self.emit("state", sid, agent=meta["agent"], state=state)
                 if state == "needs_input":
-                    self.emit("attention", sid, agent=meta["agent"], state=state, message=attention_message(plain))
+                    self.emit_attention(sid, meta["agent"], attention_message(plain), plain)
                 if state == "working":
                     s["working_since"] = now
                 elif state == "idle" and prev == "working" and s["working_since"] and now - s["working_since"] >= 8:
@@ -449,7 +489,12 @@ class Handler(BaseHTTPRequestHandler):
             sid = str(b.get("session", ""))
             kind = {"Notification": "attention", "Stop": "done"}.get(str(b.get("event", "")))
             if kind and ID_RE.match(sid) and sid in HUB.snap:
-                HUB.emit(kind, sid, agent=HUB.snap[sid].get("agent", ""), state="", message=str(b.get("message", ""))[:200])
+                snap = HUB.snap[sid]
+                msg = str(b.get("message", ""))[:200]
+                if kind == "attention":
+                    HUB.emit_attention(sid, snap.get("agent", ""), msg, strip_ansi(snap.get("text", "")))
+                else:
+                    HUB.emit(kind, sid, agent=snap.get("agent", ""), state="", message=msg)
             return self.send_json(200, {"ok": True})
 
         m = SESSION_PATH.match(path)
@@ -483,7 +528,12 @@ class Handler(BaseHTTPRequestHandler):
             resize_session(sid, cols, rows)
             return self.send_json(200, {"ok": True})
         if method == "POST" and action == "keys":
-            keys = self.read_json().get("keys", [])
+            body = self.read_json()
+            keys = body.get("keys", [])
+            guard = body.get("if_attention")
+            if guard is not None and not HUB.attention_current(sid, int(guard)):
+                # a notification action must never answer a different prompt than the one the user saw
+                return self.send_json(409, {"error": "stale", "detail": "that prompt is no longer pending"})
             send_keys(sid, keys if isinstance(keys, list) else [])
             return self.send_json(200, {"ok": True})
         self.send_json(405, {"error": "method not allowed"})

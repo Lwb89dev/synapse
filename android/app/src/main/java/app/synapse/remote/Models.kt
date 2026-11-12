@@ -22,6 +22,10 @@ data class Cursor(val x: Int = 0, val y: Int = 0, val visible: Boolean = true)
 @Serializable
 data class Screen(val text: String = "", val state: String = "idle", val cursor: Cursor? = null)
 
+/** A one-tap answer a notification may offer, e.g. Yes = keys ["y","Enter"]. Decided by the bridge. */
+@Serializable
+data class QuickAction(val label: String, val keys: List<String> = emptyList())
+
 @Serializable
 data class BridgeEvent(
     val id: Long = 0,
@@ -31,6 +35,7 @@ data class BridgeEvent(
     val state: String = "",
     val message: String = "",
     val ts: Double = 0.0,
+    val actions: List<QuickAction> = emptyList(),
     /** Seconds between the event and its delivery: large for events replayed after being offline. */
     val age: Double = 0.0,
 )
