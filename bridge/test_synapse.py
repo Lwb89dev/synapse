@@ -40,6 +40,15 @@ class Tailscale(unittest.TestCase):
         self.assertEqual(syn.parse_tailscale_status('{"Self": null}'), [])
 
 
+class TailnetHosts(unittest.TestCase):
+    def test_embedded_hosts_only_when_running(self):
+        syn.tailnet_status = lambda: {"state": "needs_login", "active": True}
+        self.assertEqual(syn.embedded_tailnet_hosts(), [])
+        syn.tailnet_status = lambda: {"state": "running", "dns_name": "synapse-omarchy.tail1.ts.net",
+                                      "ips": ["fd7a::1", "100.64.0.7"], "active": True}
+        self.assertEqual(syn.embedded_tailnet_hosts(), ["synapse-omarchy.tail1.ts.net", "100.64.0.7"])
+
+
 class HubEvents(unittest.TestCase):
     """attention must not be followed by a bogus 'done' (it replaced the alert on the phone)."""
 

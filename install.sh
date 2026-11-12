@@ -12,7 +12,8 @@ unit="$HOME/.config/systemd/user/synapse.service"
 if [[ "${1:-}" == "--uninstall" ]]; then
   systemctl --user disable --now synapse.service 2>/dev/null || true
   omarchy plugin disable synapse.remote 2>/dev/null || true
-  rm -f "$bin" "$plugin" "$unit"
+  systemctl --user disable --now synapse-net.service 2>/dev/null || true
+  rm -f "$bin" "$plugin" "$unit" "$HOME/.local/bin/synapse-net" "$HOME/.config/systemd/user/synapse-net.service"
   systemctl --user daemon-reload
   echo "Removed. Pairing data is kept in ~/.config/synapse (delete it to revoke the token)."
   exit 0
@@ -28,8 +29,26 @@ ln -sfn "$here/bridge/synapse.py" "$bin"
 ln -sfn "$here/plugin" "$plugin"
 install -m 644 "$here/systemd/synapse.service" "$unit"
 
+# Optional: the embedded tailnet node (needs Go only to build it; the result is one static binary)
+net="$HOME/.local/bin/synapse-net"
+gobuild=()
+if go version >/dev/null 2>&1; then gobuild=(go)  # a mise shim with no version set fails here, on purpose
+elif command -v mise >/dev/null && mise exec go@latest -- go version >/dev/null 2>&1; then gobuild=(mise exec go@latest -- go); fi
+if (( ${#gobuild[@]} )); then
+  echo "building synapse-net (embedded tailnet node)…"
+  (cd "$here/tailnet" && "${gobuild[@]}" build -trimpath -ldflags "-s -w" -o "$net" ./cmd/synapse-net)
+  install -m 644 "$here/systemd/synapse-net.service" "$HOME/.config/systemd/user/synapse-net.service"
+  tailnet_ok=1
+else
+  echo "note: Go not found, skipping the tailnet node (install Go or mise to enable it)"
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable --now synapse.service
+if [[ -n "${tailnet_ok:-}" ]]; then
+  systemctl --user enable --now synapse-net.service
+  echo "tailnet: run 'synapse tailnet login' to sign this machine in (one time)"
+fi
 omarchy-shell shell rescanPlugins 2>/dev/null || true
 [[ "${1:-}" == "--enable" ]] && omarchy plugin enable synapse.remote
 

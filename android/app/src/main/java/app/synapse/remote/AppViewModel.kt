@@ -22,6 +22,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var client: SynapseClient? = _pair.value?.let(::SynapseClient)
         private set
 
+    init {
+        _pair.value?.let { Tailnet.ensure(app, it) }
+    }
+
     private val _agents = MutableStateFlow(listOf("claude", "codex", "kimi", "grok"))
     val agents: StateFlow<List<String>> = _agents
 
@@ -29,6 +33,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         store.save(p)
         _pair.value = p
         client = p?.let(::SynapseClient)
+        p?.let { Tailnet.ensure(getApplication(), it) }
         agentsLoaded = false
         _sessions.value = emptyList()
         _error.value = null
@@ -39,11 +44,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Which pairing host answered (LAN / Tailscale / USB), for the status line. */
     val via: StateFlow<String?> = _via
 
+    private val _tailnet = MutableStateFlow(TailnetStatus())
+    val tailnet: StateFlow<TailnetStatus> = _tailnet
+
     private var agentsLoaded = false
 
     /** Called by the UI only while it is visible (see SynapseApp): no polling in the background. */
     suspend fun refresh() {
         val c = client ?: return
+        if (pair.value?.tailnetHost != null) _tailnet.value = Tailnet.status()
         runCatching { c.sessions() }
             .onSuccess {
                 if (c === client) { _sessions.value = it; _error.value = null; _via.value = c.activeHost }

@@ -1,0 +1,12 @@
+[Unit]
+Description=Synapse tailnet node (reach the bridge over your tailnet without installing Tailscale)
+After=synapse.service network-online.target
+Wants=synapse.service
+
+[Service]
+ExecStart=%h/.local/bin/synapse-net
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

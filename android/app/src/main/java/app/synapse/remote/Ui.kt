@@ -2,6 +2,8 @@
 
 package app.synapse.remote
 
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
@@ -224,6 +226,7 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
     val error by vm.error.collectAsStateWithLifecycle()
     val agents by vm.agents.collectAsStateWithLifecycle()
     val via by vm.via.collectAsStateWithLifecycle()
+    val tailnet by vm.tailnet.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showNew by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
@@ -245,6 +248,11 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
         floatingActionButton = { ExtendedFloatingActionButton(onClick = { showNew = true }) { Text("$ new") } },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
+            if (pair?.tailnetHost != null && tailnet.state != "running" && tailnet.state != "unavailable") {
+                TailnetCard(tailnet, onSignIn = { url ->
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                })
+            }
             via?.let {
                 Text(
                     "● ${describeHost(it)}", color = MaterialTheme.colorScheme.primary,
@@ -306,6 +314,29 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
             vm.create(agent, cwd, null) { onOpen(it.id) }
         },
     )
+}
+
+@Composable
+private fun TailnetCard(t: TailnetStatus, onSignIn: (String) -> Unit) {
+    Surface(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("$ tailscale up", style = MaterialTheme.typography.titleSmall)
+            when {
+                t.state == "needs_login" && t.authUrl != null -> {
+                    Text(
+                        "This phone is its own node on your tailnet (no VPN app needed, it works next to Mullvad). Sign in once to add it.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Button(onClick = { onSignIn(t.authUrl) }) { Text("Sign in") }
+                }
+                t.state == "error" -> Text("✗ ${t.error ?: "tailnet error"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                else -> Text("starting the tailnet node…", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
 }
 
 @Composable

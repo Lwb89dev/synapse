@@ -25,6 +25,7 @@ terminal (`synapse attach`, or `synapse run` attaches for you).
 | `plugin/` | Omarchy Quickshell bar widget (`manifest.json`, `Panel.qml`): sessions, "needs you" badge, pairing QR, bridge on/off. |
 | `systemd/synapse.service` | User unit that runs the bridge. |
 | `android/` | Kotlin + Jetpack Compose app (`./gradlew :app:assembleDebug`). |
+| `tailnet/` | Go: embedded tailnet node. `cmd/synapse-net` (desktop sidecar), `jni` (Android library), `node` (shared). |
 | `install.sh` | Symlinks everything into place. |
 
 ## Quick start
@@ -56,17 +57,27 @@ Developing the widget: the shell watches `~/.config/omarchy/plugins` with `inoti
 not follow the symlink, and keeps compiled QML in memory, so after editing `plugin/*.qml` run
 `omarchy restart shell`. `qmllint` works with `-I <dir containing a symlink "qs" -> /usr/share/omarchy/shell>`.
 
-### Away from home: Tailscale (or any VPN)
+### Away from home: Tailscale built in (no VPN app, no daemon)
 
-`synapse pair` puts every address the phone could use in the QR: LAN, and, if the `tailscale` CLI is on the
-desktop, the MagicDNS name and 100.x address. The app tries **all of them at once** and uses the first that
-answers (the sessions screen says which: `LAN`, `Tailscale`, `USB`), so being away does not cost a timeout per
-dead LAN address. When the desktop is unreachable and the pairing has a tailnet host, the app offers to open
-the Tailscale app. TLS stays pinned on top of the tunnel.
+Both ends can be **their own Tailscale node**, embedded with `tsnet` (userspace networking):
 
-This uses Tailscale *outside* the app (the official app, or whatever route reaches your tailnet). On Android only
-one system VPN can be active, so it cannot run next to e.g. Mullvad; embedding a userspace tailnet node in the app
-(tsnet/libtailscale) would avoid that, at the price of a Go/gomobile toolchain, a tailnet auth key and ~20 MB of APK.
+- **Desktop**: `synapse-net` (Go, built by `install.sh`, one static binary, systemd user unit) joins your tailnet and
+  forwards tailnet connections on :7433 to the local bridge. No Tailscale package or `tailscaled` needed.
+- **Phone**: the app embeds the same node (`libsynapsenet.so`, built by `tailnet/build-android.sh`). It is userspace, so it
+  needs no `VpnService` and **coexists with a system VPN such as Mullvad** (Android allows only one VPN app).
+- TLS stays pinned end to end on top of the tunnel; the tunnel is only transport.
+
+Setup, once: sign both nodes in to the same account. Desktop: `synapse tailnet login` (or **Sign in** in the bar widget).
+Phone: **Sign in** on the "tailscale up" card. Then `synapse pair` includes the tailnet name/IP and the app races all
+addresses (LAN, USB, tailnet) and says which one won. `synapse tailnet` shows the node state; `SYNAPSE_TS_DEBUG=1`
+turns on tsnet's verbose log; `TS_AUTHKEY` / `SYNAPSE_TS_CONTROL_URL` allow headless login or a Headscale server.
+
+Notes: the nodes show up in your Tailscale admin console as `synapse-<host>` and `synapse-android-<model>`; uploads of
+client logs to Tailscale are disabled (`TS_NO_LOGS_NO_SUPPORT`). The node disables tailscale's `netns` socket binding,
+which otherwise pins sockets to the physical interface and walks around a system VPN's kill switch (this is what broke
+the first attempt under Mullvad). Android quirks handled in `tailnet/jni`: no netlink (synthetic interface for netmon),
+no log dir (`TS_LOGS_DIR`), 16 kB-aligned ELF for Android 15+/Pixel 10. Building needs Go (`mise exec go@latest` works)
+and the Android NDK; the APK gains ~22 MB (arm64 only). Tailscale's code is BSD-3-Clause.
 
 ### Better Claude Code alerts (optional)
 

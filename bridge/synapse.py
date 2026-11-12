@@ -597,6 +597,30 @@ def parse_tailscale_status(raw: str) -> list[str]:
     return out
 
 
+TAILNET_DIR = CONFIG_DIR / "tailnet"
+
+
+def tailnet_status() -> dict:
+    """Status written by the synapse-net sidecar (embedded tailnet node), plus whether the service runs."""
+    try:
+        st = json.loads((TAILNET_DIR / "status.json").read_text())
+    except (OSError, ValueError):
+        st = {"state": "stopped"}
+    active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "synapse-net.service"]).returncode == 0
+    if not active:
+        st = {"state": "stopped"}
+    st["active"] = active
+    return st
+
+
+def embedded_tailnet_hosts() -> list[str]:
+    st = tailnet_status()
+    if st.get("state") != "running":
+        return []
+    ips = [i for i in st.get("ips", []) if ":" not in i][:1]
+    return ([st["dns_name"]] if st.get("dns_name") else []) + ips
+
+
 def tailscale_hosts() -> list[str]:
     if not shutil.which("tailscale"):
         return []
@@ -629,7 +653,7 @@ def pair_uri(hosts: list[str]) -> str:
 
 
 def cmd_pair(a) -> None:
-    hosts = a.host or list(dict.fromkeys(lan_hosts() + tailscale_hosts()))
+    hosts = a.host or list(dict.fromkeys(lan_hosts() + embedded_tailnet_hosts() + tailscale_hosts()))
     if not hosts:
         sys.exit("synapse: no network address found, pass --host")
     uri = pair_uri(hosts)
@@ -670,12 +694,37 @@ def cmd_ls(a) -> None:
         print(f"{s['id']:<28} {s['agent']:<8} {s['state']:<12} {s['cwd']}")
 
 
+def cmd_tailnet(a) -> None:
+    st = tailnet_status()
+    if a.action == "logs":
+        os.execvp("journalctl", ["journalctl", "--user", "-u", "synapse-net.service", "-n", "60", "--no-pager"])
+    if a.action == "login":
+        url = st.get("auth_url")
+        if st["state"] == "needs_login" and url:
+            print(f"Sign in to add this machine to your tailnet:\n  {url}")
+            if shutil.which("xdg-open"):
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+    if a.json:
+        print(json.dumps(st))
+        return
+    if not st["active"]:
+        print("tailnet: sidecar not running (systemctl --user enable --now synapse-net, or ./install.sh)")
+        return
+    print(f"tailnet: {st['state']}")
+    if st.get("auth_url") and st["state"] == "needs_login":
+        print(f"  sign in: {st['auth_url']}   (or: synapse tailnet login)")
+    if st.get("dns_name"):
+        print(f"  name: {st['dns_name']}\n  ips:  {', '.join(st.get('ips', []))}")
+
+
 def cmd_status(a) -> None:
     """Snapshot consumed by the Omarchy bar plugin."""
     health = local_api("/api/health")
     sessions = (local_api("/api/sessions") or {}).get("sessions", []) if health else []
     print(json.dumps({"running": bool(health), "port": load_config()["port"], "sessions": sessions,
-                      "attention": sum(1 for s in sessions if s["state"] == "needs_input")}))
+                      "attention": sum(1 for s in sessions if s["state"] == "needs_input"),
+                      "tailnet": tailnet_status()}))
 
 
 def cmd_hook(_a) -> None:
@@ -735,6 +784,11 @@ def main() -> None:
     s = sub.add_parser("token", help="print (or --rotate) the access token")
     s.add_argument("--rotate", action="store_true")
     s.set_defaults(fn=lambda a: print(get_token(a.rotate)))
+
+    s = sub.add_parser("tailnet", help="state of the embedded tailnet node (synapse-net): status | login | logs")
+    s.add_argument("action", nargs="?", default="status", choices=["status", "login", "logs"])
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_tailnet)
 
     sub.add_parser("status", help="JSON snapshot for the bar plugin").set_defaults(fn=cmd_status)
     sub.add_parser("hook", help="Claude Code hook entry point (reads JSON on stdin)").set_defaults(fn=cmd_hook)

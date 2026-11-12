@@ -26,6 +26,7 @@ Panel {
   property bool running: false
   property var sessions: []
   property int attention: 0
+  property var tailnet: ({ state: "stopped", active: false })
   property string qrSource: ""
   property string error: ""
 
@@ -88,6 +89,7 @@ Panel {
         root.running = s.running
         root.sessions = s.sessions || []
         root.attention = s.attention || 0
+        root.tailnet = s.tailnet || ({ state: "stopped", active: false })
         root.error = ""
       } catch (e) { root.error = "bad status output" }
     }
@@ -182,6 +184,29 @@ Panel {
         }
 
         PanelSeparator { foreground: root.foreground }
+
+        // embedded tailnet node (synapse-net service): state, and the sign-in link while it needs one
+        RowLayout {
+          visible: root.tailnet.active === true
+          width: parent.width
+          spacing: Style.space(8)
+          Text {
+            text: root.tailnet.state === "running" ? "tailnet · " + (root.tailnet.dns_name || "up")
+                : root.tailnet.state === "needs_login" ? "tailnet · sign-in needed"
+                : "tailnet · " + root.tailnet.state
+            color: root.tailnet.state === "running" ? root.dim : root.urgent
+            font.family: root.fontFamily
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+          }
+          Button {
+            visible: root.tailnet.state === "needs_login" && !!root.tailnet.auth_url
+            text: "Sign in"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: Quickshell.execDetached(["xdg-open", root.tailnet.auth_url])
+          }
+        }
 
         Text {
           visible: root.running && root.sessions.length === 0

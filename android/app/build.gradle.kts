@@ -16,6 +16,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        // the embedded Tailscale node (tailnet/build-android.sh) is built for arm64 only
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
@@ -30,7 +32,7 @@ android {
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    val composeBom = platform("androidx.compose:compose-bom:2025.05.00")
     implementation(composeBom)
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")

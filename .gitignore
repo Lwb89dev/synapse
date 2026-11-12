@@ -5,3 +5,5 @@ local.properties
 __pycache__/
 .idea/
 .kotlin/
+android/app/src/main/jniLibs/
+tailnet/synapse-net

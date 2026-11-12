@@ -94,9 +94,21 @@ class SynapseClient(private val pair: PairInfo) {
     @Volatile var activeHost: String? = null
         private set
 
-    private fun probe(host: String): String? = try {
-        val url = "https://${hostPart(host)}:${pair.port}"
-        http.newCall(req("$url/api/health").build()).execute().use { if (it.isSuccessful) url else null }
+    /** Base URL to reach [host]: direct, or through the embedded tailnet node's loopback forwarder. */
+    private suspend fun urlFor(host: String): String? {
+        if (!isTailnetHost(host)) return "https://${hostPart(host)}:${pair.port}"
+        // the node may still be coming up at app start: give it a few seconds, never block other hosts
+        if (!Tailnet.awaitRunning(12_000)) return null
+        val port = Tailnet.forward("${hostPart(host)}:${pair.port}") ?: return null
+        return "https://127.0.0.1:$port"
+    }
+
+    private suspend fun probe(host: String): String? = try {
+        val url = urlFor(host)
+        if (url == null) null
+        else withContext(Dispatchers.IO) {
+            http.newCall(req("$url/api/health").build()).execute().use { if (it.isSuccessful) url else null }
+        }
     } catch (e: IOException) {
         lastProbeError = e
         null

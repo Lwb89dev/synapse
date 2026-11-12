@@ -47,6 +47,7 @@ class EventsService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        Tailnet.ensure(this, pair) // the node must live as long as this service does
         // Every Activity start calls us again: keep the live stream instead of dropping events in a reconnect gap.
         if (pair == activePair && job?.isActive == true) return START_STICKY
         activePair = pair
