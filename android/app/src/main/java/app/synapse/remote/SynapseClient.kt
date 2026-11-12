@@ -90,6 +90,17 @@ class SynapseClient(private val pair: PairInfo) {
 
     private fun hostPart(h: String) = if (h.contains(':') && !h.startsWith("[")) "[$h]" else h
 
+    /** Streams currently open, and when this client last had proof the desktop is reachable (watchdog input). */
+    @Volatile var streamsOpen = 0
+        private set
+    @Volatile var lastHealthyAt = System.currentTimeMillis()
+        private set
+
+    @Synchronized private fun streamDelta(d: Int) {
+        streamsOpen = (streamsOpen + d).coerceAtLeast(0)
+        lastHealthyAt = System.currentTimeMillis()
+    }
+
     /** Host (from the QR) that answered last: lets the UI say "via Tailscale" or "via LAN". */
     @Volatile var activeHost: String? = null
         private set
@@ -137,6 +148,7 @@ class SynapseClient(private val pair: PairInfo) {
         val (host, url) = winner.await()
         base = url
         activeHost = host
+        lastHealthyAt = System.currentTimeMillis()
         return url
     }
 
@@ -152,6 +164,7 @@ class SynapseClient(private val pair: PairInfo) {
                 http.newCall(req("$b$path").method(method, rb).build()).execute().use { resp ->
                     val text = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) throw ApiException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
+                    lastHealthyAt = System.currentTimeMillis()
                     parse(text)
                 }
             } catch (e: IOException) {
@@ -222,21 +235,33 @@ class SynapseClient(private val pair: PairInfo) {
         val b = resolve()
         val request = req("$b$path").header("Accept", "text/event-stream")
             .apply { headers.forEach { (k, v) -> header(k, v) } }.build()
+        var open = false
+        fun markClosed() { if (open) { open = false; streamDelta(-1) } }
         val source = EventSources.createFactory(streamHttp).newEventSource(request, object : EventSourceListener() {
+            override fun onOpen(eventSource: EventSource, response: Response) {
+                open = true
+                streamDelta(+1)
+            }
+
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                 trySend((type ?: "message") to data)
             }
 
             override fun onClosed(eventSource: EventSource) {
+                markClosed()
                 close()
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                markClosed()
                 base = null
                 activeHost = null
                 close(t ?: IOException("stream closed (HTTP ${response?.code})"))
             }
         })
-        awaitClose { source.cancel() }
+        awaitClose {
+            source.cancel()
+            markClosed()
+        }
     }.buffer(capacity)
 }

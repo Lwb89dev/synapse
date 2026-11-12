@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.CancellationException
@@ -64,6 +65,7 @@ class EventsService : Service() {
     }
 
     private var lastStart = 0L
+    private var watchdog: Job? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
 
     /** (Re)opens the event stream, resuming after the last event seen. Safe to call from any thread. */
@@ -73,6 +75,8 @@ class EventsService : Service() {
         lastStart = System.currentTimeMillis()
         val client = SynapseClient(pair).also { activeClient = it }
         val store = Store(this)
+        watchdog?.cancel()
+        watchdog = scope.launch { watchTailnet(client, pair) }
         job = scope.launch {
             var last = store.lastEventId.takeIf { it > 0 }
             while (true) {
@@ -85,6 +89,26 @@ class EventsService : Service() {
                         if (relevant(ev, client)) notify(ev)
                     }
                 delay(3000)
+            }
+        }
+    }
+
+    /**
+     * Self-healing: if the desktop has been unreachable for a long time (no stream open, no call succeeding) while
+     * the embedded tailnet node claims to be fine, bounce the node to force fresh path discovery. Rate limited.
+     */
+    private suspend fun watchTailnet(client: SynapseClient, pair: PairInfo) {
+        if (pair.tailnetHost == null) return
+        var lastBounce = 0L
+        while (true) {
+            delay(30_000)
+            val now = System.currentTimeMillis()
+            val stuck = client.streamsOpen == 0 && now - client.lastHealthyAt > STUCK_AFTER_MS
+            if (stuck && now - lastBounce > BOUNCE_EVERY_MS) {
+                Log.w("Synapse", "desktop unreachable for ${(now - client.lastHealthyAt) / 1000}s: restarting the tailnet node")
+                lastBounce = now
+                Tailnet.stop()
+                Tailnet.ensure(this, pair)
             }
         }
     }
@@ -207,6 +231,8 @@ class EventsService : Service() {
     }
 
     companion object {
+        private const val STUCK_AFTER_MS = 90_000L
+        private const val BOUNCE_EVERY_MS = 180_000L
         const val EXTRA_SESSION = "session"
         const val ACTION_KEYS = "app.synapse.remote.KEYS"
         const val EXTRA_KEYS = "keys"
