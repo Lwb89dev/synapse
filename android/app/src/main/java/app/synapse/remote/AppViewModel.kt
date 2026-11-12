@@ -57,6 +57,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    var fontSp: Int
+        get() = store.fontSp
+        set(v) { store.fontSp = v }
+
+    /** Terminal left the screen: let the desktop terminal have its size back. */
+    fun releaseSize(id: String) {
+        val c = client ?: return
+        viewModelScope.launch { runCatching { c.resizeAuto(id) } }
+    }
+
     fun kill(id: String) {
         val c = client ?: return
         viewModelScope.launch {

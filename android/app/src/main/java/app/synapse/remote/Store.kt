@@ -7,6 +7,10 @@ import android.net.Uri
 class Store(context: Context) {
     private val prefs = context.getSharedPreferences("synapse", Context.MODE_PRIVATE)
 
+    var fontSp: Int
+        get() = prefs.getInt("fontSp", 11)
+        set(v) = prefs.edit().putInt("fontSp", v.coerceIn(7, 20)).apply()
+
     fun load(): PairInfo? = prefs.getString("pair", null)?.let(PairInfo::parse)
 
     fun save(p: PairInfo?) {

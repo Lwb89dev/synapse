@@ -11,7 +11,9 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.ConnectionSpec
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.TlsVersion
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -58,6 +60,8 @@ class SynapseClient(private val pair: PairInfo) {
         OkHttpClient.Builder()
             .sslSocketFactory(ctx.socketFactory, trust)
             .hostnameVerifier { _, _ -> true } // identity is the pinned fingerprint, not the hostname
+            // TLS 1.3 only: forward secrecy, no downgrade. The bridge refuses anything older too.
+            .connectionSpecs(listOf(ConnectionSpec.Builder(ConnectionSpec.RESTRICTED_TLS).tlsVersions(TlsVersion.TLS_1_3).build()))
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
@@ -137,6 +141,15 @@ class SynapseClient(private val pair: PairInfo) {
         val body = buildJsonObject { put("keys", JsonArray(keys.map(::JsonPrimitive))) }.toString()
         call("POST", "/api/sessions/$id/keys", body) { }
     }
+
+    /** Fit the tmux window to the phone's terminal grid. */
+    suspend fun resize(id: String, cols: Int, rows: Int) {
+        val body = buildJsonObject { put("cols", cols); put("rows", rows) }.toString()
+        call("POST", "/api/sessions/$id/resize", body) { }
+    }
+
+    /** Give the window size back to the desktop terminal. */
+    suspend fun resizeAuto(id: String) = call("POST", "/api/sessions/$id/resize", "{}") { }
 
     suspend fun kill(id: String) = call("DELETE", "/api/sessions/$id") { }
 

@@ -106,8 +106,16 @@ def list_sessions() -> list[dict]:
     return out
 
 
-def capture(sid: str, lines: int = 120) -> str | None:
-    r = tmux("capture-pane", "-p", "-t", target(sid), "-S", f"-{lines}")
+ANSI_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;:?<>=]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
+
+
+def capture(sid: str, lines: int = 120, ansi: bool = True) -> str | None:
+    """Pane contents incl. scrollback; with ansi=True SGR colour/style escapes are kept."""
+    r = tmux("capture-pane", "-p", *(["-e"] if ansi else []), "-t", target(sid), "-S", f"-{lines}")
     if r.returncode != 0:
         return None
     return r.stdout.rstrip("\n ")
@@ -177,6 +185,15 @@ def send_text(sid: str, text: str, submit: bool = True) -> None:
         tmux("send-keys", "-t", target(sid), "Enter", check=True)
 
 
+def resize_session(sid: str, cols: int | None, rows: int | None) -> None:
+    """Fit the tmux window to the phone (cols/rows), or give it back to the desktop (None)."""
+    if cols is None or rows is None:
+        tmux("resize-window", "-t", target(sid), "-A", check=True)
+        return
+    cols, rows = min(max(cols, 20), 400), min(max(rows, 5), 200)
+    tmux("resize-window", "-t", target(sid), "-x", str(cols), "-y", str(rows), check=True)
+
+
 def kill_session(sid: str) -> None:
     tmux("kill-session", "-t", target(sid), check=True)
 
@@ -239,7 +256,7 @@ class Hub:
                 self.tick()
             except Exception as e:  # keep the monitor alive whatever tmux does
                 print(f"monitor error: {e}", file=sys.stderr)
-            time.sleep(0.7)
+            time.sleep(0.25)
 
     def tick(self) -> None:
         now = time.time()
@@ -248,6 +265,7 @@ class Hub:
             text = capture(sid)
             if text is None:
                 continue
+            plain = strip_ansi(text)
             digest = hashlib.sha1(text.encode()).hexdigest()
             with self.cv:
                 s = self.snap.get(sid)
@@ -257,7 +275,7 @@ class Hub:
             changed = digest != s["hash"]
             if changed:
                 s["hash"], s["changed"] = digest, now
-            state = detect_state(text, now - s["changed"] < 2.5 and s["state"] is not None)
+            state = detect_state(plain, now - s["changed"] < 2.5 and s["state"] is not None)
             prev = s["state"]
             with self.cv:
                 if changed or state != prev:
@@ -268,7 +286,7 @@ class Hub:
             if state != prev:
                 self.emit("state", sid, agent=meta["agent"], state=state)
                 if state == "needs_input":
-                    self.emit("attention", sid, agent=meta["agent"], state=state, message=attention_message(text))
+                    self.emit("attention", sid, agent=meta["agent"], state=state, message=attention_message(plain))
                 if state == "working":
                     s["working_since"] = now
                 elif prev == "working" and s["working_since"] and now - s["working_since"] >= 8:
@@ -327,7 +345,7 @@ HUB = Hub()
 
 # ---------------------------------------------------------------- HTTP API
 
-SESSION_PATH = re.compile(r"^/api/sessions/([A-Za-z0-9_.-]{1,40})(?:/(screen|stream|input|keys))?$")
+SESSION_PATH = re.compile(r"^/api/sessions/([A-Za-z0-9_.-]{1,40})(?:/(screen|stream|input|keys|resize))?$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -442,6 +460,13 @@ class Handler(BaseHTTPRequestHandler):
             b = self.read_json()
             send_text(sid, str(b.get("text", "")), bool(b.get("submit", True)))
             return self.send_json(200, {"ok": True})
+        if method == "POST" and action == "resize":
+            b = self.read_json()
+            cols, rows = b.get("cols"), b.get("rows")
+            if cols is not None and not (isinstance(cols, int) and isinstance(rows, int)):
+                raise ValueError("cols/rows must be integers")
+            resize_session(sid, cols, rows)
+            return self.send_json(200, {"ok": True})
         if method == "POST" and action == "keys":
             keys = self.read_json().get("keys", [])
             send_keys(sid, keys if isinstance(keys, list) else [])
@@ -509,7 +534,7 @@ def serve(host: str, port: int, tls: bool, verbose: bool) -> None:
     if tls:
         cert, key = ensure_cert()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3  # both ends are ours: no legacy fallback
         ctx.load_cert_chain(cert, key)
         srv.ctx = ctx
     threading.Thread(target=HUB.run, daemon=True).start()
