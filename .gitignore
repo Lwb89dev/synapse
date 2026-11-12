@@ -7,3 +7,6 @@ __pycache__/
 .kotlin/
 android/app/src/main/jniLibs/
 tailnet/synapse-net
+*.jks
+*.keystore
+keystore.properties

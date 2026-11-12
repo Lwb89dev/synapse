@@ -20,8 +20,29 @@ android {
         ndk { abiFilters += "arm64-v8a" }
     }
 
+    // Release signing comes from the environment, never from a file in the repo:
+    //   SYNAPSE_KEYSTORE=~/Documents/vscode/keystores/synapse/synapse.release.jks
+    //   SYNAPSE_KEYSTORE_PASSWORD=...   (store and key share it: PKCS12)
+    //   SYNAPSE_KEY_ALIAS=synapse       (optional, default "synapse")
+    // Without them `assembleRelease` still builds, but unsigned.
+    val ksPath = System.getenv("SYNAPSE_KEYSTORE")
+    val ksPass = System.getenv("SYNAPSE_KEYSTORE_PASSWORD")
+    signingConfigs {
+        if (!ksPath.isNullOrBlank() && !ksPass.isNullOrEmpty()) {
+            create("release") {
+                storeFile = file(ksPath)
+                storePassword = ksPass
+                keyAlias = System.getenv("SYNAPSE_KEY_ALIAS") ?: "synapse"
+                keyPassword = ksPass
+            }
+        }
+    }
+
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

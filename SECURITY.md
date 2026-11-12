@@ -39,7 +39,8 @@ The token and the pin both travel only in the pairing QR/link; treat that QR lik
   navigates: it cannot send keys.
 * **The agent runs with your privileges.** A phone that can answer an agent's prompt can approve whatever that
   prompt asks. The one-tap guard prevents answering the *wrong* prompt, not approving a bad one.
-* Debug builds are `debuggable` (adb `run-as` can read app data). Ship a release build for daily use.
+* Debug builds are `debuggable` (adb `run-as` can read app data). Use a signed release build for daily use (see README);
+  the signing keystore must stay outside the repo and backed up: losing it means no more updates over an installed app.
 * No automated dependency/CVE scan is wired in: run `govulncheck ./...` in `tailnet/` and keep `tailscale.com` current.
 
 ## Lost or compromised phone

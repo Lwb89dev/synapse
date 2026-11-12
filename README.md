@@ -93,6 +93,20 @@ the desktop or the agent moved on to another question, cannot answer the wrong o
 "Already handled, nothing was sent." The buttons are executed by the foreground service, over whatever path reached
 the desktop (LAN, USB or tailnet).
 
+### Release build (signed)
+
+Debug builds are `debuggable`; for daily use build and sign a release. The keystore is never in the repo and the
+password never on disk: Gradle reads them from the environment.
+
+```bash
+cd android
+SYNAPSE_KEYSTORE=~/Documents/vscode/keystores/synapse/synapse.release.jks \
+SYNAPSE_KEYSTORE_PASSWORD='…' ./gradlew :app:assembleRelease      # alias defaults to "synapse"
+```
+
+Without those variables `assembleRelease` still builds, unsigned. A release signed with a different key than the debug
+build cannot be installed over it (uninstall first: the pairing is lost and the phone must be paired again).
+
 ### Better Claude Code alerts (optional)
 
 `synapse claude-hooks` prints a `hooks` block (Notification + Stop) to merge into
