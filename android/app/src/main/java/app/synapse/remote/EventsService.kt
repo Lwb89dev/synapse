@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -56,7 +58,19 @@ class EventsService : Service() {
         // Every Activity start calls us again: keep the live stream instead of dropping events in a reconnect gap.
         if (pair == activePair && job?.isActive == true) return START_STICKY
         activePair = pair
+        watchNetwork()
+        startStream(pair)
+        return START_STICKY
+    }
+
+    private var lastStart = 0L
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** (Re)opens the event stream, resuming after the last event seen. Safe to call from any thread. */
+    @Synchronized
+    private fun startStream(pair: PairInfo) {
         job?.cancel()
+        lastStart = System.currentTimeMillis()
         val client = SynapseClient(pair).also { activeClient = it }
         val store = Store(this)
         job = scope.launch {
@@ -73,7 +87,23 @@ class EventsService : Service() {
                 delay(3000)
             }
         }
-        return START_STICKY
+    }
+
+    /**
+     * A new default network (Wi-Fi <-> mobile, back from Doze, VPN up/down) makes the old connection useless:
+     * reconnect now instead of waiting for the read timeout.
+     */
+    private fun watchNetwork() {
+        if (netCallback != null) return
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val pair = activePair ?: return
+                if (System.currentTimeMillis() - lastStart < 4000) return // the initial callback right after a start
+                startStream(pair)
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(cb) }.onSuccess { netCallback = cb }
     }
 
     /** Replayed events (age > 20 s) are only worth a notification if they still matter. */
@@ -171,6 +201,7 @@ class EventsService : Service() {
     }
 
     override fun onDestroy() {
+        netCallback?.let { runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } }
         scope.cancel()
         super.onDestroy()
     }

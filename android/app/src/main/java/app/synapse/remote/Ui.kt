@@ -4,6 +4,8 @@ package app.synapse.remote
 
 import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
@@ -228,6 +230,10 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
     val via by vm.via.collectAsStateWithLifecycle()
     val tailnet by vm.tailnet.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val power = remember { context.getSystemService(PowerManager::class.java) }
+    var unrestricted by remember { mutableStateOf(power.isIgnoringBatteryOptimizations(context.packageName)) }
+    var batteryLater by remember { mutableStateOf(false) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { unrestricted = power.isIgnoringBatteryOptimizations(context.packageName) }
     var showNew by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
 
@@ -248,6 +254,16 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
         floatingActionButton = { ExtendedFloatingActionButton(onClick = { showNew = true }) { Text("$ new") } },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
+            if (!unrestricted && !batteryLater) {
+                BatteryCard(
+                    onAllow = {
+                        context.startActivity(
+                            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")),
+                        )
+                    },
+                    onLater = { batteryLater = true },
+                )
+            }
             if (pair?.tailnetHost != null && tailnet.state != "running" && tailnet.state != "unavailable") {
                 TailnetCard(tailnet, onSignIn = { url ->
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -314,6 +330,27 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
             vm.create(agent, cwd, null) { onOpen(it.id) }
         },
     )
+}
+
+@Composable
+private fun BatteryCard(onAllow: () -> Unit, onLater: () -> Unit) {
+    Surface(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.tertiaryContainer,
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("$ battery --allow", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "With the screen off Android suspends the network of apps it considers idle, so alerts can arrive late or " +
+                    "not at all. Exempt Synapse to keep the connection (and the alerts) alive.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onAllow) { Text("Allow") }
+                TextButton(onClick = onLater) { Text("Later") }
+            }
+        }
+    }
 }
 
 @Composable
