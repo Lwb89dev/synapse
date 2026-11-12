@@ -38,6 +38,7 @@ if (( ${#gobuild[@]} )); then
   echo "building synapse-net (embedded tailnet node)…"
   (cd "$here/tailnet" && "${gobuild[@]}" build -trimpath -ldflags "-s -w" -o "$net" ./cmd/synapse-net)
   install -m 644 "$here/systemd/synapse-net.service" "$HOME/.config/systemd/user/synapse-net.service"
+  systemctl --user try-restart synapse-net.service 2>/dev/null || true  # pick up the rebuilt binary
   tailnet_ok=1
 else
   echo "note: Go not found, skipping the tailnet node (install Go or mise to enable it)"

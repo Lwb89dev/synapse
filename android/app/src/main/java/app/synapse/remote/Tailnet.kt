@@ -26,6 +26,7 @@ object Tailnet {
     private const val TAG = "Tailnet"
     private var loaded: Boolean? = null
     private var started = false
+    private var startError: String? = null
 
     @JvmStatic private external fun nativeStart(dir: String, host: String, key: String, url: String): String
     @JvmStatic private external fun nativeStatus(): String
@@ -54,7 +55,12 @@ object Tailnet {
         val dir = ctx.filesDir.resolve("tailnet").apply { mkdirs() }.absolutePath
         val host = "synapse-android-" + Build.MODEL.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
         val err = nativeStart(dir, host, authKey, controlUrl)
-        if (err.isEmpty()) started = true
+        if (err.isEmpty()) {
+            started = true
+            startError = null
+        } else {
+            startError = err
+        }
         return err.ifEmpty { null }
     }
 
@@ -65,7 +71,7 @@ object Tailnet {
 
     fun status(): TailnetStatus {
         if (!available()) return TailnetStatus("unavailable")
-        if (!started) return TailnetStatus("stopped")
+        if (!started) return startError?.let { TailnetStatus("error", error = it) } ?: TailnetStatus("stopped")
         return try {
             val j = JSONObject(nativeStatus())
             TailnetStatus(

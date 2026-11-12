@@ -33,7 +33,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         store.save(p)
         _pair.value = p
         client = p?.let(::SynapseClient)
-        p?.let { Tailnet.ensure(getApplication(), it) }
+        // keep the embedded node only while the pairing actually uses the tailnet (saves battery)
+        if (p?.tailnetHost != null) Tailnet.ensure(getApplication(), p) else Tailnet.stop()
         agentsLoaded = false
         _sessions.value = emptyList()
         _error.value = null

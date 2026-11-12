@@ -54,8 +54,8 @@ func New(o Options) *Node {
 
 func (n *Node) Start() error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	if n.srv != nil {
+		n.mu.Unlock()
 		return errors.New("already started")
 	}
 	prepareEnv(n.opts.Dir)
@@ -73,11 +73,13 @@ func (n *Node) Start() error {
 	}
 	if err := n.srv.Start(); err != nil {
 		n.srv = nil
+		n.mu.Unlock()
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	n.stop = cancel
-	n.setLocked(Status{State: "starting"})
+	n.mu.Unlock()
+	n.set(Status{State: "starting"}) // notifies, so UIs see "starting" before the first poll
 	go n.poll(ctx)
 	return nil
 }
@@ -168,20 +170,17 @@ func trimDot(s string) string {
 	return s
 }
 
+// set records a status and, on a real change, notifies OnStatus synchronously and in order (it is only ever
+// called from the poll goroutine, Start and Close), never while holding the lock.
 func (n *Node) set(s Status) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.setLocked(s)
-}
-
-func (n *Node) setLocked(s Status) {
 	s.Updated = time.Now().Unix()
+	n.mu.Lock()
 	prev := n.status
 	n.status = s
-	// only notify on real changes, not on every poll
-	prev.Updated, s.Updated = 0, 0
+	n.mu.Unlock()
+	prev.Updated, s.Updated = 0, 0 // only notify on real changes, not on every poll
 	if n.opts.OnStatus != nil && !equal(prev, s) {
-		go n.opts.OnStatus(n.status)
+		n.opts.OnStatus(s)
 	}
 }
 
@@ -226,6 +225,28 @@ func (n *Node) Listen(network, addr string) (net.Listener, error) {
 		return nil, err
 	}
 	return s.Listen(network, addr)
+}
+
+// SameUser reports whether remote ("ip:port" of an incoming tailnet connection) is a device signed in as the
+// same user as this node. Tagged nodes and lookups that fail are refused.
+func (n *Node) SameUser(ctx context.Context, remote string) bool {
+	s, err := n.server()
+	if err != nil {
+		return false
+	}
+	lc, err := s.LocalClient()
+	if err != nil {
+		return false
+	}
+	st, err := lc.StatusWithoutPeers(ctx)
+	if err != nil || st.Self == nil {
+		return false
+	}
+	who, err := lc.WhoIs(ctx, remote)
+	if err != nil || who.Node == nil || len(who.Node.Tags) > 0 {
+		return false
+	}
+	return who.Node.User == st.Self.UserID
 }
 
 func (n *Node) Close() {

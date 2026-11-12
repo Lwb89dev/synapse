@@ -40,10 +40,11 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
 
 
 def load_config() -> dict:
-    cfg = {"port": DEFAULT_PORT, "agents": dict(DEFAULT_AGENTS)}
+    cfg = {"port": DEFAULT_PORT, "host": "0.0.0.0", "agents": dict(DEFAULT_AGENTS)}
     try:
         user = json.loads((CONFIG_DIR / "config.json").read_text())
         cfg["port"] = int(user.get("port", cfg["port"]))
+        cfg["host"] = str(user.get("host", cfg["host"]))
         cfg["agents"].update(user.get("agents", {}))
     except (OSError, ValueError):
         pass
@@ -751,11 +752,12 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="run the bridge server")
-    s.add_argument("--host", default="0.0.0.0")
+    s.add_argument("--host", default=None, help='address to bind (default: config "host", else 0.0.0.0)')
     s.add_argument("--port", type=int, default=None)
     s.add_argument("--no-tls", action="store_true", help="plain HTTP (development only!)")
     s.add_argument("-v", "--verbose", action="store_true")
-    s.set_defaults(fn=lambda a: serve(a.host, a.port or load_config()["port"], not a.no_tls, a.verbose))
+    s.set_defaults(fn=lambda a: serve(a.host or load_config()["host"], a.port or load_config()["port"],
+                                      not a.no_tls, a.verbose))
 
     s = sub.add_parser("pair", help="show the QR code to pair the phone")
     s.add_argument("--host", action="append", help="address the phone should use (repeatable)")

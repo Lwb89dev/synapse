@@ -1,3 +1,5 @@
+//go:build android
+
 // Command jni builds (as a c-shared library) the embedded tailnet node for the Android app.
 // The exported C functions are called from jni.c, which exposes them to Kotlin. Only strings cross the
 // boundary. The app never routes system traffic through the node: it asks for a loopback port that is

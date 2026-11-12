@@ -71,6 +71,8 @@ Setup, once: sign both nodes in to the same account. Desktop: `synapse tailnet l
 Phone: **Sign in** on the "tailscale up" card. Then `synapse pair` includes the tailnet name/IP and the app races all
 addresses (LAN, USB, tailnet) and says which one won. `synapse tailnet` shows the node state; `SYNAPSE_TS_DEBUG=1`
 turns on tsnet's verbose log; `TS_AUTHKEY` / `SYNAPSE_TS_CONTROL_URL` allow headless login or a Headscale server.
+`synapse-net` only forwards devices signed in as the **same user** as the desktop node (checked with WhoIs per
+connection; tagged nodes and other users' devices are refused unless you pass `-any-peer`).
 
 Notes: the nodes show up in your Tailscale admin console as `synapse-<host>` and `synapse-android-<model>`; uploads of
 client logs to Tailscale are disabled (`TS_NO_LOGS_NO_SUPPORT`). The node disables tailscale's `netns` socket binding,
@@ -88,8 +90,11 @@ permission to use Bash") instead of the screen heuristic.
 ### Config — `~/.config/synapse/config.json`
 
 ```json
-{ "port": 7433, "agents": { "aider": "aider --model sonnet", "claude-yolo": "claude --foo" } }
+{ "port": 7433, "host": "0.0.0.0", "agents": { "aider": "aider --model sonnet", "claude-yolo": "claude --foo" } }
 ```
+
+`"host": "127.0.0.1"` stops the bridge from listening on the LAN: it is then reachable only through the tailnet
+(`synapse-net` forwards to loopback) or USB (`adb reverse`).
 
 ## Security model
 

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Lwb89dev/synapse/tailnet/node"
 )
@@ -22,6 +24,7 @@ func main() {
 	name := flag.String("hostname", "synapse-"+host, "name of this node in the tailnet")
 	port := flag.String("port", "7433", "tailnet port to listen on")
 	target := flag.String("target", "127.0.0.1:7433", "local bridge to forward to")
+	anyPeer := flag.Bool("any-peer", false, "also accept devices of other users of your tailnet (default: only your own devices)")
 	control := flag.String("control-url", os.Getenv("SYNAPSE_TS_CONTROL_URL"), "alternative control server (Headscale)")
 	flag.Parse()
 
@@ -66,6 +69,16 @@ func main() {
 			log.Fatal(err)
 		}
 		go func() {
+			if !*anyPeer {
+				ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+				ok := n.SameUser(ctx, c.RemoteAddr().String())
+				cancel()
+				if !ok {
+					log.Printf("refused %s: not a device of this account", c.RemoteAddr())
+					c.Close()
+					return
+				}
+			}
 			local, err := net.Dial("tcp", *target)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "bridge unreachable:", err)
