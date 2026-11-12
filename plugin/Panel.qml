@@ -97,7 +97,8 @@ Panel {
 
   Process {
     id: qrProcess
-    command: ["sh", "-c", "umask 077; '" + root.cli + "' pair --format svg > '" + root.qrPath + "'"]
+    // paths go in as arguments ($0, $1), never interpolated into the shell string
+    command: ["sh", "-c", "umask 077; exec \"$0\" pair --format svg > \"$1\"", root.cli, root.qrPath]
     onExited: function(code) {
       if (code === 0) root.qrSource = "file://" + root.qrPath + "?" + Date.now()
       else root.error = "could not build the QR"
@@ -204,7 +205,10 @@ Panel {
             text: "Sign in"
             foreground: root.foreground
             fontFamily: root.fontFamily
-            onClicked: Quickshell.execDetached(["xdg-open", root.tailnet.auth_url])
+            onClicked: {
+              var u = String(root.tailnet.auth_url || "")
+              if (u.indexOf("https://") === 0) Quickshell.execDetached(["xdg-open", u])
+            }
           }
         }
 

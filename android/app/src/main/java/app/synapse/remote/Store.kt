@@ -2,19 +2,31 @@ package app.synapse.remote
 
 import android.content.Context
 import android.net.Uri
+import java.security.MessageDigest
 
 /** Keeps the pairing (token included) AES-GCM encrypted with an Android Keystore key. */
 class Store(context: Context) {
     private val prefs = context.getSharedPreferences("synapse", Context.MODE_PRIVATE)
 
+    init {
+        // older builds kept the whole pairing link (it carries the token) in clear text: scrub it
+        if (prefs.contains("lastLink")) prefs.edit().remove("lastLink").apply()
+    }
+
     var fontSp: Int
         get() = prefs.getInt("fontSp", 11)
         set(v) = prefs.edit().putInt("fontSp", v.coerceIn(7, 20)).apply()
 
-    /** The last synapse:// link already shown to the user: Android re-delivers a task's original intent on restart. */
-    var lastLink: String?
-        get() = prefs.getString("lastLink", null)
-        set(v) = prefs.edit().putString("lastLink", v).apply()
+    /**
+     * True the first time a given synapse:// link is seen (Android re-delivers a task's original intent on restart).
+     * Only a SHA-256 of the link is stored: the link carries the access token and must never sit in clear text.
+     */
+    fun isNewLink(link: String): Boolean {
+        val h = MessageDigest.getInstance("SHA-256").digest(link.toByteArray()).joinToString("") { "%02x".format(it) }
+        if (prefs.getString("lastLinkHash", null) == h) return false
+        prefs.edit().putString("lastLinkHash", h).remove("lastLink").apply() // also drops the clear-text value of older builds
+        return true
+    }
 
     /** Last bridge event this phone has seen, so a reconnect can ask for what it missed. */
     var lastEventId: Long

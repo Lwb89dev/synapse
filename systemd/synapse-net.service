@@ -8,5 +8,22 @@ ExecStart=%h/.local/bin/synapse-net
 Restart=on-failure
 RestartSec=5
 
+# This process only forwards TCP: confine it. (Not applied to synapse.service: it starts tmux and the agents,
+# which would inherit the restrictions.)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/synapse
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
 [Install]
 WantedBy=default.target

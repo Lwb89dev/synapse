@@ -266,7 +266,8 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
             }
             if (pair?.tailnetHost != null && tailnet.state != "running" && tailnet.state != "unavailable") {
                 TailnetCard(tailnet, onSignIn = { url ->
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    // the URL comes from the native node: still, never hand anything but a plain https page to the browser
+                    if (url.startsWith("https://")) context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                 })
             }
             via?.let {

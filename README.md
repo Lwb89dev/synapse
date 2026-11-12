@@ -110,6 +110,9 @@ permission to use Bash") instead of the screen heuristic.
 
 ## Security model
 
+See [SECURITY.md](SECURITY.md) for the full model, known limits and how to revoke (`synapse revoke`).
+Summary:
+
 Controlling a terminal agent is remote code execution by design, so:
 
 - **End-to-end encrypted: TLS 1.3 only, pinned self-signed cert.** Phone and desktop talk

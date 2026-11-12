@@ -60,8 +60,7 @@ class MainActivity : ComponentActivity() {
         // synapse://pair?... opened from a link/QR scanner app
         val link = i.data?.toString()
         val store = Store(this)
-        if (link != null && link != store.lastLink) {
-            store.lastLink = link // ask once per distinct link, even if the task is restarted with the same intent
+        if (link != null && store.isNewLink(link)) { // ask once per distinct link, even if the task is restarted
             PairInfo.parse(link)?.let { pendingPair.value = it }
         }
         i.data = null // consumed

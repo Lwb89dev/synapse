@@ -22,7 +22,7 @@ class Helpers(unittest.TestCase):
     def test_valid_key(self):
         for k in ("Enter", "Escape", "C-c", "y", "1", "BTab"):
             self.assertTrue(syn.valid_key(k), k)
-        for k in ("rm -rf", "ls", "C-cc", "", "Enter;"):
+        for k in ("rm -rf", "ls", "C-cc", "", "Enter;", "C-c\n", "Enter\n", "y\n", "\n", "C-\n"):
             self.assertFalse(syn.valid_key(k), k)
 
     def test_detect_state(self):

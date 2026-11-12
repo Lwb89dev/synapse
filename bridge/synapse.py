@@ -51,25 +51,60 @@ def load_config() -> dict:
     return cfg
 
 
-def get_token(rotate: bool = False) -> str:
+def private_dir() -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = CONFIG_DIR / "token"
+    CONFIG_DIR.chmod(0o700)  # mkdir(mode=) is ignored for a directory that already existed
+    return CONFIG_DIR
+
+
+def write_private(path: Path, data: str) -> None:
+    """Write a secret so it is never visible with looser permissions, even for an instant: 0600 from creation,
+    via a temp file renamed into place."""
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def get_token(rotate: bool = False) -> str:
+    path = private_dir() / "token"
     if rotate or not path.exists():
-        path.write_text(secrets.token_urlsafe(32))
-        path.chmod(0o600)
+        write_private(path, secrets.token_urlsafe(32))
     return path.read_text().strip()
+
+
+_token_cache: dict = {"stamp": None, "value": ""}
+
+
+def current_token() -> str:
+    """The token as it is on disk now. Re-read when the file changes, so `synapse token --rotate` revokes every
+    paired phone immediately instead of at the next restart."""
+    path = CONFIG_DIR / "token"
+    try:
+        st = path.stat()
+    except OSError:
+        return secrets.token_urlsafe(32)  # no token file: nobody can authenticate
+    stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+    if _token_cache["stamp"] != stamp:
+        _token_cache.update(stamp=stamp, value=path.read_text().strip())
+    return _token_cache["value"]
 
 
 def ensure_cert() -> tuple[Path, Path]:
     """Self-signed EC cert, created once. The phone pins its SHA-256 (from the QR)."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private_dir()
     cert, key = CONFIG_DIR / "cert.pem", CONFIG_DIR / "key.pem"
     if not (cert.exists() and key.exists()):
-        subprocess.run(
-            ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-             "-nodes", "-keyout", str(key), "-out", str(cert), "-days", "3650", "-subj", "/CN=synapse"],
-            check=True, capture_output=True,
-        )
+        old = os.umask(0o077)  # the private key must never exist with group/other bits
+        try:
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                 "-nodes", "-keyout", str(key), "-out", str(cert), "-days", "3650", "-subj", "/CN=synapse"],
+                check=True, capture_output=True,
+            )
+        finally:
+            os.umask(old)
         key.chmod(0o600)
     return cert, key
 
@@ -151,7 +186,7 @@ def create_session(agent: str, cwd: str | None = None, name: str | None = None,
     if not os.path.isdir(workdir):
         raise ValueError(f"not a directory: {workdir}")
     if name:
-        if not ID_RE.match(name):
+        if not ID_RE.fullmatch(name):
             raise ValueError("invalid session name")
         sid = name
     else:
@@ -179,7 +214,8 @@ CHORD_RE = re.compile(r"^[CMS]-[A-Za-z0-9]$")
 
 
 def valid_key(k: str) -> bool:
-    return k in NAMED_KEYS or bool(CHORD_RE.match(k)) or len(k) == 1
+    # a bare character must be printable ASCII: control characters (newline, ESC, ^C...) only through their names
+    return k in NAMED_KEYS or bool(CHORD_RE.fullmatch(k)) or (len(k) == 1 and k.isascii() and k.isprintable())
 
 
 def send_keys(sid: str, keys: list[str]) -> None:
@@ -404,7 +440,6 @@ SESSION_PATH = re.compile(r"^/api/sessions/([A-Za-z0-9_.-]{1,40})(?:/(screen|str
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"synapse/{VERSION}"
-    token = ""
     tls = True
     verbose = False
 
@@ -420,7 +455,10 @@ class Handler(BaseHTTPRequestHandler):
     # -- helpers
     def authed(self) -> bool:
         h = self.headers.get("Authorization", "")
-        return h.startswith("Bearer ") and hmac.compare_digest(h[7:].strip(), self.token)
+        if not h.startswith("Bearer "):
+            return False
+        # compare bytes: hmac.compare_digest raises on non-ASCII str, and the header is client-controlled
+        return hmac.compare_digest(h[7:].strip().encode("utf-8", "replace"), current_token().encode())
 
     def send_json(self, code: int, obj) -> None:
         body = json.dumps(obj).encode()
@@ -432,8 +470,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_json(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
-        if n > 1_000_000:
-            raise ValueError("body too large")
+        if n < 0 or n > 1_000_000:  # a negative length would make read() wait for EOF
+            raise ValueError("bad body length")
         data = json.loads(self.rfile.read(n) or b"{}")
         if not isinstance(data, dict):
             raise ValueError("expected a JSON object")
@@ -488,7 +526,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self.read_json()
             sid = str(b.get("session", ""))
             kind = {"Notification": "attention", "Stop": "done"}.get(str(b.get("event", "")))
-            if kind and ID_RE.match(sid) and sid in HUB.snap:
+            if kind and ID_RE.fullmatch(sid) and sid in HUB.snap:
                 snap = HUB.snap[sid]
                 msg = str(b.get("message", ""))[:200]
                 if kind == "attention":
@@ -497,7 +535,7 @@ class Handler(BaseHTTPRequestHandler):
                     HUB.emit(kind, sid, agent=snap.get("agent", ""), state="", message=msg)
             return self.send_json(200, {"ok": True})
 
-        m = SESSION_PATH.match(path)
+        m = SESSION_PATH.fullmatch(path)
         if not m:
             return self.send_json(404, {"error": "not found"})
         sid, action = m.group(1), m.group(2)
@@ -562,8 +600,8 @@ class Handler(BaseHTTPRequestHandler):
             version = new_version
 
     def stream_events(self) -> None:
+        last = int(self.headers.get("Last-Event-ID") or HUB.last_event_id())  # may raise: before any bytes are sent
         self.sse_start()
-        last = int(self.headers.get("Last-Event-ID") or HUB.last_event_id())
         self.wfile.write(b": connected\n\n")
         self.wfile.flush()
         while True:
@@ -577,15 +615,32 @@ class Handler(BaseHTTPRequestHandler):
                 last = e["id"]
 
 
+_count_lock = threading.Lock()
+MAX_CONNECTIONS = 128  # every connection costs a thread; an unauthenticated flood must not exhaust them
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     ctx: ssl.SSLContext | None = None
+    active = 0
+
+    def verify_request(self, request, client_address) -> bool:
+        return self.active < MAX_CONNECTIONS
+
+    def process_request_thread(self, request, client_address) -> None:
+        with _count_lock:
+            self.active += 1
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with _count_lock:
+                self.active -= 1
 
     def get_request(self):
         sock, addr = super().get_request()
         if self.ctx:
-            sock.settimeout(10)
+            sock.settimeout(5)  # handshake and request line must arrive quickly; SSE removes it after auth
             sock = self.ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=False)
         return sock, addr
 
@@ -596,10 +651,8 @@ class Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def serve(host: str, port: int, tls: bool, verbose: bool) -> None:
-    if not shutil.which("tmux"):
-        sys.exit("synapse: tmux not found")
-    Handler.token = get_token()
+def make_server(host: str, port: int, tls: bool, verbose: bool = False) -> "Server":
+    get_token()  # make sure a token exists
     Handler.tls = tls
     Handler.verbose = verbose
     srv = Server((host, port), Handler)
@@ -609,6 +662,13 @@ def serve(host: str, port: int, tls: bool, verbose: bool) -> None:
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3  # both ends are ours: no legacy fallback
         ctx.load_cert_chain(cert, key)
         srv.ctx = ctx
+    return srv
+
+
+def serve(host: str, port: int, tls: bool, verbose: bool) -> None:
+    if not shutil.which("tmux"):
+        sys.exit("synapse: tmux not found")
+    srv = make_server(host, port, tls, verbose)
     threading.Thread(target=HUB.run, daemon=True).start()
     print(f"synapse {VERSION} listening on {'https' if tls else 'http'}://{host}:{port}", flush=True)
     try:
@@ -684,8 +744,13 @@ def tailscale_hosts() -> list[str]:
 
 def local_api(path: str, method: str = "GET", body: dict | None = None, timeout: float = 2.0):
     cfg = load_config()
-    ctx = ssl.create_default_context()
-    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # loopback to ourselves
+    # The token goes to whatever listens on 127.0.0.1:<port>. Trust only our own certificate (pinned as the sole
+    # CA), so a process that grabbed the port while the bridge was down cannot harvest it.
+    cert, _ = ensure_cert()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.load_verify_locations(cafile=str(cert))
+    ctx.check_hostname = False  # identity is the pinned certificate, not a hostname
     req = urllib.request.Request(
         f"https://127.0.0.1:{cfg['port']}{path}", method=method,
         data=json.dumps(body).encode() if body is not None else None,
@@ -745,6 +810,19 @@ def cmd_ls(a) -> None:
         print(f"{s['id']:<28} {s['agent']:<8} {s['state']:<12} {s['cwd']}")
 
 
+def cmd_revoke(a) -> None:
+    """Cut off every paired phone: new token (effective immediately), and with --cert a new certificate."""
+    get_token(rotate=True)
+    print("token rotated: every paired phone is refused from now on (no restart needed)")
+    if a.cert:
+        for f in ("cert.pem", "key.pem"):
+            (CONFIG_DIR / f).unlink(missing_ok=True)
+        ensure_cert()
+        subprocess.run(["systemctl", "--user", "try-restart", "synapse.service"])
+        print("certificate regenerated and the bridge restarted: phones must be paired again anyway")
+    print("pair a phone again with:  synapse pair")
+
+
 def cmd_tailnet(a) -> None:
     st = tailnet_status()
     if a.action == "logs":
@@ -753,7 +831,7 @@ def cmd_tailnet(a) -> None:
         url = st.get("auth_url")
         if st["state"] == "needs_login" and url:
             print(f"Sign in to add this machine to your tailnet:\n  {url}")
-            if shutil.which("xdg-open"):
+            if shutil.which("xdg-open") and url.startswith("https://"):
                 subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
     if a.json:
@@ -841,6 +919,10 @@ def main() -> None:
     s.add_argument("action", nargs="?", default="status", choices=["status", "login", "logs"])
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_tailnet)
+
+    s = sub.add_parser("revoke", help="revoke every paired phone (rotate the token; --cert also the certificate)")
+    s.add_argument("--cert", action="store_true")
+    s.set_defaults(fn=cmd_revoke)
 
     sub.add_parser("status", help="JSON snapshot for the bar plugin").set_defaults(fn=cmd_status)
     sub.add_parser("hook", help="Claude Code hook entry point (reads JSON on stdin)").set_defaults(fn=cmd_hook)

@@ -160,6 +160,15 @@ class EventsService : Service() {
             .setContentIntent(pi)
             .setAutoCancel(true)
             .setPriority(if (urgent) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+            // prompts can quote code, paths or secrets: the lock screen only gets a generic version
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(this, if (urgent) CH_ALERT else CH_DONE)
+                    .setSmallIcon(R.drawable.ic_stat_synapse)
+                    .setContentTitle("Synapse")
+                    .setContentText(if (urgent) "An agent needs you" else "An agent finished")
+                    .build(),
+            )
         if (urgent) {
             // one-tap answers chosen by the bridge for the prompt on screen; each carries the event id so a late tap
             // on a prompt that has since changed is refused by the bridge instead of answering the wrong question
@@ -174,7 +183,9 @@ class EventsService : Service() {
                     this, nid * 31 + i + 1, act,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )
-                builder.addAction(0, a.label, api)
+                // setAuthenticationRequired: on a locked phone the action asks for the unlock first (Android 12+), so
+                // nobody holding a lost/locked phone can approve a prompt from the lock screen
+                builder.addAction(NotificationCompat.Action.Builder(0, a.label, api).setAuthenticationRequired(true).build())
             }
         }
         getSystemService(NotificationManager::class.java).notify(nid, builder.build())
