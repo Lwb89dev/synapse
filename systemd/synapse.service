@@ -7,6 +7,8 @@ ExecStart=%h/.local/bin/synapse serve
 Restart=on-failure
 RestartSec=3
 # tmux/agents are found through the interactive shell, but the server itself only needs these
+# agents are started through the login shell so mise/nvm PATH tweaks apply (%s = the user's shell)
+Environment=SHELL=%s
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 
 [Install]
