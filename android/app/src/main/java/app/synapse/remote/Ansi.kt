@@ -109,18 +109,54 @@ private class Pen {
     }
 }
 
-/** Turns tmux `capture-pane -e` output into styled text. */
-fun parseAnsi(src: String, p: AnsiPalette): AnnotatedString {
+/**
+ * Turns tmux `capture-pane -e` output into styled text. [cursor] (row counted in the captured text, column in
+ * cells) is drawn as an inverted block, padding past the end of the trimmed text when it sits below the content.
+ */
+fun parseAnsi(src: String, p: AnsiPalette, cursor: Cursor? = null): AnnotatedString {
     val clean = NON_SGR.replace(src, "")
     val pen = Pen()
+    val cur = cursor?.takeIf { it.visible }
+    val cursorStyle = SpanStyle(color = p.bg, background = p.fg)
     return buildAnnotatedString {
+        var row = 0
+        var col = 0
+        var drawn = false
+
+        fun segment(text: String) {
+            val style = pen.style(p)
+            var runStart = 0
+            for (i in text.indices) {
+                val ch = text[i]
+                if (cur != null && !drawn && row == cur.y && col == cur.x) {
+                    if (i > runStart) withStyle(style) { append(text, runStart, i) }
+                    if (ch == '\n') {
+                        withStyle(cursorStyle) { append(' ') } // cursor at end of line: block, then the newline
+                        runStart = i
+                    } else {
+                        withStyle(cursorStyle) { append(ch) }
+                        runStart = i + 1
+                    }
+                    drawn = true
+                }
+                if (ch == '\n') { row++; col = 0 } else col++
+            }
+            if (runStart < text.length) withStyle(style) { append(text, runStart, text.length) }
+        }
+
         var last = 0
         for (m in SGR.findAll(clean)) {
-            if (m.range.first > last) withStyle(pen.style(p)) { append(clean.substring(last, m.range.first)) }
+            if (m.range.first > last) segment(clean.substring(last, m.range.first))
             val params = m.groupValues[1].split(';', ':').map { it.toIntOrNull() ?: 0 }.ifEmpty { listOf(0) }
             pen.apply(params, p)
             last = m.range.last + 1
         }
-        if (last < clean.length) withStyle(pen.style(p)) { append(clean.substring(last)) }
+        if (last < clean.length) segment(clean.substring(last))
+
+        if (cur != null && !drawn) { // below/after the trimmed text
+            while (row < cur.y) { append('\n'); row++; col = 0 }
+            while (col < cur.x) { append(' '); col++ }
+            withStyle(cursorStyle) { append(' ') }
+        }
     }
 }

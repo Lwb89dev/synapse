@@ -56,6 +56,18 @@ Developing the widget: the shell watches `~/.config/omarchy/plugins` with `inoti
 not follow the symlink, and keeps compiled QML in memory, so after editing `plugin/*.qml` run
 `omarchy restart shell`. `qmllint` works with `-I <dir containing a symlink "qs" -> /usr/share/omarchy/shell>`.
 
+### Away from home: Tailscale (or any VPN)
+
+`synapse pair` puts every address the phone could use in the QR: LAN, and, if the `tailscale` CLI is on the
+desktop, the MagicDNS name and 100.x address. The app tries **all of them at once** and uses the first that
+answers (the sessions screen says which: `LAN`, `Tailscale`, `USB`), so being away does not cost a timeout per
+dead LAN address. When the desktop is unreachable and the pairing has a tailnet host, the app offers to open
+the Tailscale app. TLS stays pinned on top of the tunnel.
+
+This uses Tailscale *outside* the app (the official app, or whatever route reaches your tailnet). On Android only
+one system VPN can be active, so it cannot run next to e.g. Mullvad; embedding a userspace tailnet node in the app
+(tsnet/libtailscale) would avoid that, at the price of a Go/gomobile toolchain, a tailnet auth key and ~20 MB of APK.
+
 ### Better Claude Code alerts (optional)
 
 `synapse claude-hooks` prints a `hooks` block (Notification + Stop) to merge into
@@ -99,13 +111,13 @@ All endpoints need `Authorization: Bearer <token>`.
 |---|---|
 | `GET /api/health` | `{ok, host, version, agents}` |
 | `GET /api/sessions` · `POST /api/sessions {agent, cwd?, name?}` | list / create |
-| `GET /api/sessions/{id}/screen?lines=120` | `{text, state}`; `text` keeps ANSI SGR colour escapes |
+| `GET /api/sessions/{id}/screen?lines=120` | `{text, state, cursor:{x,y,visible}}`; `text` keeps ANSI SGR colour escapes, `y` counts lines of `text` |
 | `GET /api/sessions/{id}/stream` | SSE, event `screen` on every change (polled at 4 Hz) |
 | `POST /api/sessions/{id}/resize {cols, rows}` | fit the tmux window to the phone; `{}` gives it back to the desktop |
 | `POST /api/sessions/{id}/input {text, submit=true}` | paste text (+ Enter) |
 | `POST /api/sessions/{id}/keys {keys:[...]}` | tmux key names: `Enter`, `Escape`, `C-c`, `y`, … |
 | `DELETE /api/sessions/{id}` | kill |
-| `GET /api/events` | SSE: `state`, `attention`, `done` events (supports `Last-Event-ID`) |
+| `GET /api/events` | SSE: `state`, `attention`, `done` events; ids survive bridge restarts, `Last-Event-ID` resumes, each event carries `age` (s) |
 
 ## Tests
 
@@ -113,14 +125,16 @@ All endpoints need `Authorization: Bearer <token>`.
 
 ## Status / known gaps (v0.1)
 
-- The screen is a polled `capture-pane` snapshot (4 Hz, full frame), not a raw PTY byte stream:
-  no cursor position, no mouse. Cheap on a LAN; deltas would help on slow links.
+- The screen is a polled `capture-pane` snapshot (4 Hz, full frame), not a raw PTY byte stream: no mouse,
+  cursor drawn from tmux's position. Cheap on a LAN; deltas would help on slow links.
 - "Fit to phone" resizes the tmux window to the phone's width while the terminal screen is open,
   so a desktop terminal attached to the same session shrinks meanwhile (restored when you leave).
 - Notifications come from a foreground service holding an SSE connection; it works while the
   phone can reach the desktop. No FCM/ntfy relay for off-network wake-ups.
-- Events missed while the phone was disconnected are not replayed (the app doesn't send `Last-Event-ID` yet).
+- The bridge keeps the last 200 events in memory; a phone offline for longer than a bridge restart loses older
+  alerts. Replayed alerts older than 15 min are dropped, and an old "needs you" is only shown if the agent is
+  still waiting.
 - Only sessions started via `synapse run` / the app are managed (`synapse-*` tmux sessions).
 - The Quickshell widget was written against Omarchy's `qs.Ui` components but has not been
   lint-checked in a live shell yet; the bridge and the Android build are tested.
-- Token is stored in app-private SharedPreferences (move behind the Keystore).
+- The pairing (token included) is AES-GCM encrypted with an Android Keystore key.

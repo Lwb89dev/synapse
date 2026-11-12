@@ -35,6 +35,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (p != null) viewModelScope.launch { refresh() }
     }
 
+    private val _via = MutableStateFlow<String?>(null)
+    /** Which pairing host answered (LAN / Tailscale / USB), for the status line. */
+    val via: StateFlow<String?> = _via
+
     private var agentsLoaded = false
 
     /** Called by the UI only while it is visible (see SynapseApp): no polling in the background. */
@@ -42,9 +46,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val c = client ?: return
         runCatching { c.sessions() }
             .onSuccess {
-                if (c === client) { _sessions.value = it; _error.value = null }
+                if (c === client) { _sessions.value = it; _error.value = null; _via.value = c.activeHost }
             }
-            .onFailure { if (c === client) _error.value = it.message ?: it.javaClass.simpleName }
+            .onFailure { if (c === client) { _error.value = it.message ?: it.javaClass.simpleName; _via.value = null } }
         if (!agentsLoaded && _error.value == null) {
             runCatching { c.agents() }.onSuccess { if (it.isNotEmpty() && c === client) { _agents.value = it; agentsLoaded = true } }
         }

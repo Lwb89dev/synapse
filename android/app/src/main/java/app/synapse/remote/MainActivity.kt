@@ -58,7 +58,12 @@ class MainActivity : ComponentActivity() {
         i ?: return
         i.getStringExtra(EventsService.EXTRA_SESSION)?.let { requested.value = it }
         // synapse://pair?... opened from a link/QR scanner app
-        i.data?.toString()?.let(PairInfo::parse)?.let { pendingPair.value = it }
+        val link = i.data?.toString()
+        val store = Store(this)
+        if (link != null && link != store.lastLink) {
+            store.lastLink = link // ask once per distinct link, even if the task is restarted with the same intent
+            PairInfo.parse(link)?.let { pendingPair.value = it }
+        }
         i.data = null // consumed
     }
 

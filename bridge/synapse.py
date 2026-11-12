@@ -121,6 +121,18 @@ def capture(sid: str, lines: int = 120, ansi: bool = True) -> str | None:
     return r.stdout.rstrip("\n ")
 
 
+def cursor_info(sid: str, lines: int = 120) -> dict | None:
+    """Cursor position as (x, row-in-captured-text, visible). Row counts the scrollback capture() includes."""
+    r = tmux("display-message", "-p", "-t", target(sid),
+             "#{cursor_x} #{cursor_y} #{cursor_flag} #{history_size} #{alternate_on}")
+    parts = r.stdout.split()
+    if r.returncode != 0 or len(parts) != 5:
+        return None
+    x, y, flag, hist, _alt = (int(v) for v in parts)
+    # capture-pane -S -N prepends min(history, N) lines (also with the alternate screen on, verified on tmux 3.8)
+    return {"x": x, "y": min(hist, lines) + y, "visible": bool(flag)}
+
+
 def session_exists(sid: str) -> bool:
     return tmux("has-session", "-t", target(sid)).returncode == 0
 
@@ -239,7 +251,7 @@ class Hub:
         self.cv = threading.Condition()
         self.snap: dict[str, dict] = {}
         self.events: list[dict] = []
-        self.next_id = 1
+        self.next_id = int(time.time() * 1000)  # monotonic across bridge restarts: clients can resume with Last-Event-ID
         self.version = 0
 
     def emit(self, type_: str, session: str, **kw) -> None:
@@ -266,7 +278,8 @@ class Hub:
             if text is None:
                 continue
             plain = strip_ansi(text)
-            digest = hashlib.sha1(text.encode()).hexdigest()
+            cursor = cursor_info(sid)
+            digest = hashlib.sha1((text + repr(cursor)).encode()).hexdigest()
             with self.cv:
                 s = self.snap.get(sid)
                 if s is None:
@@ -280,7 +293,7 @@ class Hub:
             with self.cv:
                 if changed or state != prev:
                     self.version += 1
-                    s.update(text=text, state=state, version=self.version)
+                    s.update(text=text, state=state, cursor=cursor, version=self.version)
                 s.update(agent=meta["agent"], cwd=meta["cwd"], created=meta["created"], activity=meta["activity"])
                 self.cv.notify_all()
             if state != prev:
@@ -308,7 +321,7 @@ class Hub:
     def screen(self, sid: str) -> dict | None:
         with self.cv:
             s = self.snap.get(sid)
-            return {"text": s["text"], "state": s["state"] or "idle"} if s else None
+            return {"text": s["text"], "state": s["state"] or "idle", "cursor": s.get("cursor")} if s else None
 
     def wait_screen(self, sid: str, version: int, timeout: float) -> tuple[dict | None, int]:
         with self.cv:
@@ -318,10 +331,10 @@ class Hub:
                 if s is None:
                     return None, version
                 if s["version"] > version:
-                    return {"text": s["text"], "state": s["state"] or "idle"}, s["version"]
+                    return {"text": s["text"], "state": s["state"] or "idle", "cursor": s.get("cursor")}, s["version"]
                 left = end - time.time()
                 if left <= 0:
-                    return {"text": s["text"], "state": s["state"] or "idle"}, version  # keepalive tick
+                    return {"text": s["text"], "state": s["state"] or "idle", "cursor": s.get("cursor")}, version  # keepalive tick
                 self.cv.wait(left)
 
     def wait_events(self, after: int, timeout: float) -> list[dict]:
@@ -453,7 +466,8 @@ class Handler(BaseHTTPRequestHandler):
             if text is None:
                 return self.send_json(404, {"error": "no such session"})
             snap = HUB.screen(sid)
-            return self.send_json(200, {"text": text, "state": snap["state"] if snap else "idle"})
+            return self.send_json(200, {"text": text, "state": snap["state"] if snap else "idle",
+                                        "cursor": cursor_info(sid, lines)})
         if method == "GET" and action == "stream":
             return self.stream_screen(sid)
         if method == "POST" and action == "input":
@@ -507,7 +521,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
             for e in evs:
-                self.sse("event", e, e["id"])
+                # age lets a client tell a replayed (missed while offline) event from a live one
+                self.sse("event", {**e, "age": round(time.time() - e["ts"], 1)}, e["id"])
                 last = e["id"]
 
 
@@ -568,6 +583,30 @@ def lan_hosts() -> list[str]:
     return lan + other
 
 
+def parse_tailscale_status(raw: str) -> list[str]:
+    """MagicDNS name first (stable, survives IP changes), then the 100.x address."""
+    try:
+        me = json.loads(raw).get("Self") or {}
+    except ValueError:
+        return []
+    out = []
+    name = (me.get("DNSName") or "").rstrip(".")
+    if name:
+        out.append(name)
+    out += [ip for ip in me.get("TailscaleIPs", []) if ":" not in ip][:1]
+    return out
+
+
+def tailscale_hosts() -> list[str]:
+    if not shutil.which("tailscale"):
+        return []
+    try:
+        r = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return parse_tailscale_status(r.stdout) if r.returncode == 0 else []
+
+
 def local_api(path: str, method: str = "GET", body: dict | None = None, timeout: float = 2.0):
     cfg = load_config()
     ctx = ssl.create_default_context()
@@ -590,7 +629,7 @@ def pair_uri(hosts: list[str]) -> str:
 
 
 def cmd_pair(a) -> None:
-    hosts = a.host or lan_hosts()
+    hosts = a.host or list(dict.fromkeys(lan_hosts() + tailscale_hosts()))
     if not hosts:
         sys.exit("synapse: no network address found, pass --host")
     uri = pair_uri(hosts)

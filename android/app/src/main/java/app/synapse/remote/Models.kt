@@ -17,7 +17,10 @@ data class Session(
 data class SessionList(val sessions: List<Session> = emptyList())
 
 @Serializable
-data class Screen(val text: String = "", val state: String = "idle")
+data class Cursor(val x: Int = 0, val y: Int = 0, val visible: Boolean = true)
+
+@Serializable
+data class Screen(val text: String = "", val state: String = "idle", val cursor: Cursor? = null)
 
 @Serializable
 data class BridgeEvent(
@@ -28,7 +31,23 @@ data class BridgeEvent(
     val state: String = "",
     val message: String = "",
     val ts: Double = 0.0,
+    /** Seconds between the event and its delivery: large for events replayed after being offline. */
+    val age: Double = 0.0,
 )
+
+private val CGNAT = Regex("^100\\.(6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])\\.\\d+\\.\\d+$")
+
+/** Tailscale MagicDNS name or 100.64.0.0/10 address. */
+fun isTailnetHost(h: String) = h.endsWith(".ts.net") || CGNAT.matches(h)
+
+/** Human label for the path the app is using to reach the desktop. */
+fun describeHost(h: String?): String = when {
+    h == null -> ""
+    h == "127.0.0.1" -> "USB (adb reverse)"
+    isTailnetHost(h) -> "Tailscale · $h"
+    h.startsWith("192.168.") || h.startsWith("10.") || Regex("^172\\.(1[6-9]|2\\d|3[01])\\.").containsMatchIn(h) -> "LAN · $h"
+    else -> h
+}
 
 /** What the QR printed by `synapse pair` contains. */
 data class PairInfo(
@@ -38,6 +57,8 @@ data class PairInfo(
     val fingerprint: String,
     val name: String,
 ) {
+    val tailnetHost: String? get() = hosts.firstOrNull(::isTailnetHost)
+
     companion object {
         private val HOST_RE = Regex("^[A-Za-z0-9.\\-:]{1,253}$")
         private val FP_RE = Regex("^[0-9a-f]{64}$")

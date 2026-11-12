@@ -1,6 +1,11 @@
 package app.synapse.remote
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -85,26 +90,42 @@ class SynapseClient(private val pair: PairInfo) {
 
     private fun hostPart(h: String) = if (h.contains(':') && !h.startsWith("[")) "[$h]" else h
 
-    /** Tries each host from the QR (LAN, VPN, ...) until one answers; the winner is cached. */
-    private suspend fun resolve(): String = withContext(Dispatchers.IO) {
-        base ?: run {
-            var last: Exception? = null
-            for (h in pair.hosts) {
-                val url = "https://${hostPart(h)}:${pair.port}"
-                try {
-                    http.newCall(req("$url/api/health").build()).execute().use {
-                        if (it.isSuccessful) {
-                            base = url
-                            return@run url
-                        }
-                        last = ApiException(it.code, "HTTP ${it.code}")
-                    }
-                } catch (e: IOException) {
-                    last = e
-                }
-            }
-            throw last ?: IOException("no host to try")
+    /** Host (from the QR) that answered last: lets the UI say "via Tailscale" or "via LAN". */
+    @Volatile var activeHost: String? = null
+        private set
+
+    private fun probe(host: String): String? = try {
+        val url = "https://${hostPart(host)}:${pair.port}"
+        http.newCall(req("$url/api/health").build()).execute().use { if (it.isSuccessful) url else null }
+    } catch (e: IOException) {
+        lastProbeError = e
+        null
+    } catch (e: IllegalArgumentException) {
+        lastProbeError = e
+        null
+    }
+
+    @Volatile private var lastProbeError: Exception? = null
+
+    /**
+     * Tries every host from the QR (LAN, Tailscale, USB...) at the same time and takes the first that answers,
+     * so being away from home does not cost a 4 s timeout per unreachable LAN address.
+     */
+    private suspend fun resolve(): String {
+        base?.let { return it }
+        val winner = CompletableDeferred<Pair<String, String>>()
+        val pending = AtomicInteger(pair.hosts.size)
+        // Own scope, not cancelled afterwards: a blocking connect cannot be interrupted, let it end by itself.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        for (h in pair.hosts) scope.launch {
+            val url = probe(h)
+            if (url != null) winner.complete(h to url)
+            if (pending.decrementAndGet() == 0) winner.completeExceptionally(lastProbeError ?: IOException("no host to try"))
         }
+        val (host, url) = winner.await()
+        base = url
+        activeHost = host
+        return url
     }
 
     private suspend fun <T> call(method: String, path: String, body: String? = null, parse: (String) -> T): T {
@@ -123,6 +144,7 @@ class SynapseClient(private val pair: PairInfo) {
                 }
             } catch (e: IOException) {
                 base = null // network moved under us: re-resolve next time
+                activeHost = null
                 throw e
             }
         }
@@ -171,13 +193,16 @@ class SynapseClient(private val pair: PairInfo) {
     fun screenStream(id: String): Flow<Screen> =
         sse("/api/sessions/$id/stream", Channel.CONFLATED).map { json.decodeFromString<Screen>(it.second) }
 
-    fun events(): Flow<BridgeEvent> =
-        sse("/api/events", Channel.UNLIMITED).map { json.decodeFromString<BridgeEvent>(it.second) }
+    /** [lastId]: resume after this event id (the bridge replays what was missed while we were offline). */
+    fun events(lastId: Long? = null): Flow<BridgeEvent> =
+        sse("/api/events", Channel.UNLIMITED, lastId?.let { mapOf("Last-Event-ID" to it.toString()) } ?: emptyMap())
+            .map { json.decodeFromString<BridgeEvent>(it.second) }
 
     /** [capacity]: CONFLATED keeps only the newest frame (screens), UNLIMITED never drops (events). */
-    private fun sse(path: String, capacity: Int): Flow<Pair<String, String>> = callbackFlow {
+    private fun sse(path: String, capacity: Int, headers: Map<String, String> = emptyMap()): Flow<Pair<String, String>> = callbackFlow {
         val b = resolve()
-        val request = req("$b$path").header("Accept", "text/event-stream").build()
+        val request = req("$b$path").header("Accept", "text/event-stream")
+            .apply { headers.forEach { (k, v) -> header(k, v) } }.build()
         val source = EventSources.createFactory(streamHttp).newEventSource(request, object : EventSourceListener() {
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                 trySend((type ?: "message") to data)
@@ -189,6 +214,7 @@ class SynapseClient(private val pair: PairInfo) {
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 base = null
+                activeHost = null
                 close(t ?: IOException("stream closed (HTTP ${response?.code})"))
             }
         })

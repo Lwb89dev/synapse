@@ -52,15 +52,33 @@ class EventsService : Service() {
         activePair = pair
         job?.cancel()
         val client = SynapseClient(pair)
+        val store = Store(this)
         job = scope.launch {
+            var last = store.lastEventId.takeIf { it > 0 }
             while (true) {
-                client.events()
+                // On reconnect ask for everything after the last event we saw: alerts that fired while we were offline.
+                client.events(last)
                     .catch { /* fall through to retry */ }
-                    .collect { ev -> if (ev.type == "attention" || ev.type == "done") notify(ev) }
+                    .collect { ev ->
+                        last = ev.id
+                        store.lastEventId = ev.id
+                        if (relevant(ev, client)) notify(ev)
+                    }
                 delay(3000)
             }
         }
         return START_STICKY
+    }
+
+    /** Replayed events (age > 20 s) are only worth a notification if they still matter. */
+    private suspend fun relevant(ev: BridgeEvent, client: SynapseClient): Boolean {
+        if (ev.type != "attention" && ev.type != "done") return false
+        if (ev.age <= 20) return true
+        if (ev.age > 900) return false // stale
+        if (ev.type == "done") return true
+        // an old attention is moot if the agent has been answered since
+        val s = runCatching { client.sessions() }.getOrNull()?.firstOrNull { it.id == ev.session }
+        return s?.state == "needs_input"
     }
 
     private fun notify(ev: BridgeEvent) {

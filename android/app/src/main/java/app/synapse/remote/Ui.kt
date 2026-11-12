@@ -59,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -71,6 +72,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
@@ -221,6 +223,8 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
     val pair by vm.pair.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     val agents by vm.agents.collectAsStateWithLifecycle()
+    val via by vm.via.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var showNew by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
 
@@ -241,11 +245,26 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
         floatingActionButton = { ExtendedFloatingActionButton(onClick = { showNew = true }) { Text("$ new") } },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
-            error?.let {
+            via?.let {
                 Text(
-                    "✗ disconnected: $it", color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall,
+                    "● ${describeHost(it)}", color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
                 )
+            }
+            error?.let {
+                Column(Modifier.padding(16.dp)) {
+                    Text("✗ disconnected: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    if (pair?.tailnetHost != null) {
+                        // away from home the way back is the tailnet: make sure Tailscale is up on this phone
+                        val launch = remember { context.packageManager.getLaunchIntentForPackage("com.tailscale.ipn") }
+                        Text(
+                            "Reaching ${pair?.tailnetHost} needs Tailscale (or another route to your tailnet) on this phone.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                        if (launch != null) TextButton(onClick = { context.startActivity(launch) }) { Text("Open Tailscale") }
+                    }
+                }
             }
             if (sessions.isEmpty() && error == null) {
                 Text(
@@ -347,39 +366,48 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
     val palette = remember(cs.onSurface, cs.surfaceContainerLowest, dark) {
         AnsiPalette.of(dark, cs.onSurface, cs.surfaceContainerLowest)
     }
-    val styled = remember(screen.text, palette) { parseAnsi(screen.text, palette) }
+    val styled = remember(screen.text, screen.cursor, palette) { parseAnsi(screen.text, palette, screen.cursor) }
     val termStyle = remember(fontSp) {
         TextStyle(fontFamily = Mono, fontSize = fontSp.sp, lineHeight = (fontSp * 1.25f).sp)
     }
     val charPx = remember(fontSp) { measurer.measure("M".repeat(20), termStyle).size.width / 20f }
 
     // Live screen: initial snapshot, then SSE frames; reconnects forever.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(id) {
         runCatching { client.screen(id) }.onSuccess { screen = it }
-        while (true) {
-            try {
-                client.screenStream(id).collect { live = true; failure = null; screen = it }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // network trouble: fall through and retry
+        // Stream only while the screen is visible: no 4 Hz traffic (and battery drain) in the background.
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            if (ended) return@repeatOnLifecycle
+            while (true) {
+                try {
+                    client.screenStream(id).collect { live = true; failure = null; screen = it }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // network trouble: fall through and retry
+                }
+                live = false
+                // The stream also ends cleanly when the session is gone: tell that apart from a bridge restart.
+                val gone = try {
+                    client.sessions().none { it.id == id }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    false
+                }
+                if (gone) { ended = true; break }
+                delay(2000)
             }
-            live = false
-            // The stream also ends cleanly when the session is gone: tell that apart from a bridge restart.
-            val gone = try {
-                client.sessions().none { it.id == id }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                false
-            }
-            if (gone) { ended = true; break }
-            delay(2000)
         }
     }
 
     // Make the tmux window exactly as wide as the phone's grid, so TUIs reflow instead of overflowing.
-    LaunchedEffect(cols, fit) {
+    var refit by remember { mutableIntStateOf(0) }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { refit++ }
+    // Phone in the pocket: give the desktop terminal its size back; fit again when we return.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.releaseSize(id) }
+    LaunchedEffect(cols, fit, refit) {
         if (cols < 20) return@LaunchedEffect
         delay(250)
         runCatching { if (fit) client.resize(id, cols, FIT_ROWS) else client.resizeAuto(id) }
@@ -428,7 +456,9 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                                     append(if (ended) "✗ ended" else if (live) "● live" else "○ offline")
                                 }
                                 withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · ") }
-                                withStyle(SpanStyle(color = sc)) { append(screen.state.replace('_', ' ')) }
+                                withStyle(SpanStyle(color = if (ended) cs.onSurfaceVariant else sc)) {
+                                    append(if (ended) "closed" else screen.state.replace('_', ' '))
+                                }
                                 if (fit && cols > 0) withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · $cols×$FIT_ROWS") }
                             },
                             style = MaterialTheme.typography.labelSmall, maxLines = 1,

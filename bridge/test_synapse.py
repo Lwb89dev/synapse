@@ -32,6 +32,14 @@ class Helpers(unittest.TestCase):
         self.assertEqual(syn.detect_state("$ ", False), "idle")
 
 
+class Tailscale(unittest.TestCase):
+    def test_parse_status(self):
+        raw = '{"Self": {"DNSName": "omarchy.tail1234.ts.net.", "TailscaleIPs": ["100.64.0.7", "fd7a::7"]}}'
+        self.assertEqual(syn.parse_tailscale_status(raw), ["omarchy.tail1234.ts.net", "100.64.0.7"])
+        self.assertEqual(syn.parse_tailscale_status("not json"), [])
+        self.assertEqual(syn.parse_tailscale_status('{"Self": null}'), [])
+
+
 class HubEvents(unittest.TestCase):
     """attention must not be followed by a bogus 'done' (it replaced the alert on the phone)."""
 
@@ -55,6 +63,11 @@ class HubEvents(unittest.TestCase):
             (10, "e"),                                      # screen still -> idle: done
         ])
         self.assertEqual(types, ["attention", "done"])
+
+    def test_event_ids_survive_restart(self):
+        a = syn.Hub(); a.emit("state", "x")
+        b = syn.Hub()
+        self.assertGreaterEqual(b.next_id, a.events[0]["id"])
 
     def test_short_work_is_not_done(self):
         # 4 s of work, then the screen goes still
