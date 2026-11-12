@@ -13,6 +13,7 @@ import "C"
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -26,6 +27,8 @@ var (
 	mu       sync.Mutex
 	nd       *node.Node
 	forwards = map[string]*fwd{}
+	// per-process secret the app writes first on every forwarder connection (see node.CheckPreamble)
+	preamble []byte
 )
 
 type fwd struct {
@@ -38,9 +41,14 @@ func cstr(s string) *C.char { return C.CString(s) }
 // SynapseStart brings the node up (non-blocking). Returns "" or an error message.
 //
 //export SynapseStart
-func SynapseStart(stateDir, hostname, authKey, controlURL *C.char) *C.char {
+func SynapseStart(stateDir, hostname, authKey, controlURL, secretHex *C.char) *C.char {
 	mu.Lock()
 	defer mu.Unlock()
+	secret, err := hex.DecodeString(C.GoString(secretHex))
+	if err != nil || len(secret) != 32 {
+		return cstr("forwarder secret must be 32 bytes of hex")
+	}
+	preamble = secret
 	if nd != nil {
 		return cstr("")
 	}
@@ -97,6 +105,15 @@ func SynapseForward(target *C.char) *C.char {
 				return
 			}
 			go func() {
+				// only our own app knows the secret: anything else connecting to 127.0.0.1 is dropped before it
+				// can touch the tailnet
+				mu.Lock()
+				secret := preamble
+				mu.Unlock()
+				if !node.CheckPreamble(c, secret, 5*time.Second) {
+					c.Close()
+					return
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 				defer cancel()
 				r, err := n.Dial(ctx, "tcp", t)

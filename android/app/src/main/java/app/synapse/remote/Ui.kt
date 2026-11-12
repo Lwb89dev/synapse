@@ -2,7 +2,9 @@
 
 package app.synapse.remote
 
+import android.app.Activity
 import android.content.Intent
+import android.view.WindowManager
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
@@ -233,6 +235,7 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
     val power = remember { context.getSystemService(PowerManager::class.java) }
     var unrestricted by remember { mutableStateOf(power.isIgnoringBatteryOptimizations(context.packageName)) }
     var batteryLater by remember { mutableStateOf(false) }
+    var secure by remember { mutableStateOf(vm.secureScreen) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { unrestricted = power.isIgnoringBatteryOptimizations(context.packageName) }
     var showNew by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
@@ -245,6 +248,16 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
                     Box {
                         TextButton(onClick = { menu = true }) { Text("⋮") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Block screenshots") },
+                                leadingIcon = { Checkbox(checked = secure, onCheckedChange = null) },
+                                onClick = {
+                                    secure = !secure
+                                    vm.secureScreen = secure
+                                    (context as? Activity)?.let { applySecureScreen(it, secure) }
+                                    menu = false
+                                },
+                            )
                             DropdownMenuItem(text = { Text("Unpair") }, onClick = { menu = false; vm.setPair(null) })
                         }
                     }
@@ -331,6 +344,12 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
             vm.create(agent, cwd, null) { onOpen(it.id) }
         },
     )
+}
+
+/** FLAG_SECURE: terminal content stays out of screenshots, screen recordings and the recents thumbnail. */
+fun applySecureScreen(activity: Activity, on: Boolean) {
+    if (on) activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    else activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
 }
 
 @Composable

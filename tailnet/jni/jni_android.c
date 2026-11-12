@@ -10,16 +10,18 @@ static jstring wrap(JNIEnv *env, char *s) {
 }
 
 JNIEXPORT jstring JNICALL Java_app_synapse_remote_Tailnet_nativeStart(
-        JNIEnv *env, jclass cls, jstring dir, jstring host, jstring key, jstring url) {
+        JNIEnv *env, jclass cls, jstring dir, jstring host, jstring key, jstring url, jstring secret) {
     const char *d = (*env)->GetStringUTFChars(env, dir, 0);
     const char *h = (*env)->GetStringUTFChars(env, host, 0);
     const char *k = (*env)->GetStringUTFChars(env, key, 0);
     const char *u = (*env)->GetStringUTFChars(env, url, 0);
-    char *r = SynapseStart((char *)d, (char *)h, (char *)k, (char *)u);
+    const char *s = (*env)->GetStringUTFChars(env, secret, 0);
+    char *r = SynapseStart((char *)d, (char *)h, (char *)k, (char *)u, (char *)s);
     (*env)->ReleaseStringUTFChars(env, dir, d);
     (*env)->ReleaseStringUTFChars(env, host, h);
     (*env)->ReleaseStringUTFChars(env, key, k);
     (*env)->ReleaseStringUTFChars(env, url, u);
+    (*env)->ReleaseStringUTFChars(env, secret, s);
     return wrap(env, r);
 }
 

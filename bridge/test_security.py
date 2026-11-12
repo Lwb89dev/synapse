@@ -251,6 +251,102 @@ class DenialOfService(ServerCase):
         self.assertLess(time.time() - t0, 8)
 
 
+class PerAddressLimits(ServerCase):
+    def test_one_address_cannot_take_every_slot(self):
+        self.srv.exempt_loopback = False  # the test can only connect from loopback: treat it as a LAN host
+        socks = []
+        try:
+            for _ in range(syn.PER_IP_CONNECTIONS + 20):
+                try:
+                    socks.append(socket.create_connection(("127.0.0.1", self.port), timeout=2))
+                except OSError:
+                    break
+            time.sleep(0.5)
+            self.assertLessEqual(self.srv.per_ip.get("127.0.0.1", 0), syn.PER_IP_CONNECTIONS)
+            self.assertLessEqual(self.srv.active, syn.PER_IP_CONNECTIONS)
+        finally:
+            for s_ in socks:
+                s_.close()
+            self.srv.exempt_loopback = True
+        deadline = time.time() + 12
+        while time.time() < deadline and self.srv.active:
+            time.sleep(0.3)
+        self.assertEqual(self.srv.per_ip, {}, "per-address counters leaked")
+        self.assertTrue(self.alive())
+
+    def test_failed_logins_are_logged_but_rate_limited(self):
+        logged = []
+        real = syn.security_log
+        syn.security_log = logged.append
+        self.srv.auth_failures.clear()
+        try:
+            for _ in range(5):
+                self.call("GET", "/api/health", "wrong")
+        finally:
+            syn.security_log = real
+        self.assertEqual(len(logged), 1, logged)
+        self.assertIn("127.0.0.1", logged[0])
+        self.assertEqual(self.srv.auth_failures["127.0.0.1"][1], 5)
+
+
+class SecretsStayOutOfArgv(unittest.TestCase):
+    """/proc/<pid>/cmdline is readable by every local user: secrets must travel on stdin."""
+
+    def test_typed_text_goes_to_tmux_on_stdin(self):
+        calls = []
+        real = syn.tmux
+        syn.tmux = lambda *a, check=False, input_=None: calls.append((a, input_))
+        try:
+            syn.send_text("demo", "hunter2 my password", submit=False)
+        finally:
+            syn.tmux = real
+        self.assertTrue(calls)
+        for args, stdin in calls:
+            self.assertFalse(any("hunter2" in x for x in args), args)
+        self.assertIn("hunter2 my password", [stdin for _, stdin in calls])
+
+    def _run_pair(self, fmt, show_uri=False):
+        import argparse
+        import contextlib
+        import io
+        seen = []
+
+        class Done:
+            stdout = ""
+
+        def fake_run(cmd, *a, **kw):
+            seen.append((list(cmd), kw.get("input")))
+            return Done()
+
+        real_run, real_which = syn.subprocess.run, syn.shutil.which
+        syn.subprocess.run = fake_run
+        syn.shutil.which = lambda name: "/usr/bin/" + name
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                syn.cmd_pair(argparse.Namespace(host=["127.0.0.1"], format=fmt, show_uri=show_uri))
+        finally:
+            syn.subprocess.run, syn.shutil.which = real_run, real_which
+        return seen, out.getvalue()
+
+    def test_pairing_link_goes_to_qrencode_on_stdin(self):
+        token = syn.get_token()
+        for fmt in ("svg", "ansi"):
+            seen, _ = self._run_pair(fmt)
+            qr = [c for c in seen if c[0] and c[0][0] == "qrencode"]
+            self.assertTrue(qr, fmt)
+            self.assertFalse(any(token in arg for arg in qr[0][0]), f"token in qrencode argv ({fmt})")
+            self.assertIn(token, qr[0][1])
+
+    def test_default_output_does_not_print_the_link_but_shows_the_fingerprint(self):
+        token = syn.get_token()
+        _, out = self._run_pair("ansi")
+        self.assertNotIn(token, out)
+        self.assertIn(syn.cert_fingerprint()[:16], out)
+        _, out = self._run_pair("ansi", show_uri=True)
+        self.assertIn(token, out)
+
+
 class LocalApiPinning(ServerCase):
     def test_local_api_refuses_a_rogue_listener_and_never_sends_it_the_token(self):
         rogue_dir = TMP / "rogue"

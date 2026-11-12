@@ -32,7 +32,7 @@ terminal (`synapse attach`, or `synapse run` attaches for you).
 
 ```bash
 ./install.sh --enable      # CLI, systemd user unit, bar widget
-synapse pair                # QR in the terminal (or: bar widget → Pair a phone)
+synapse pair                # QR + certificate fingerprint (or: bar widget → Pair a phone)
 synapse run claude          # start an agent you can also drive from the phone
 ```
 

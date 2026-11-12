@@ -7,6 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
 
 /** State of the embedded tailnet node (see tailnet/ in the repo). */
 data class TailnetStatus(
@@ -28,7 +30,17 @@ object Tailnet {
     private var started = false
     private var startError: String? = null
 
-    @JvmStatic private external fun nativeStart(dir: String, host: String, key: String, url: String): String
+    /**
+     * Per-process secret written first on every connection to our loopback forwarders. Other apps on the phone can
+     * connect to 127.0.0.1 as well; without the secret the native forwarder drops them before touching the tailnet.
+     */
+    private val preamble = ByteArray(32).also { SecureRandom().nextBytes(it) }
+    private val forwardPorts: MutableSet<Int> = ConcurrentHashMap.newKeySet()
+
+    fun preamble(): ByteArray = preamble.copyOf()
+    fun isForwardPort(port: Int) = port in forwardPorts
+
+    @JvmStatic private external fun nativeStart(dir: String, host: String, key: String, url: String, secret: String): String
     @JvmStatic private external fun nativeStatus(): String
     @JvmStatic private external fun nativeForward(target: String): String
     @JvmStatic private external fun nativeStop()
@@ -54,7 +66,7 @@ object Tailnet {
         if (started) return null
         val dir = ctx.filesDir.resolve("tailnet").apply { mkdirs() }.absolutePath
         val host = "synapse-android-" + Build.MODEL.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
-        val err = nativeStart(dir, host, authKey, controlUrl)
+        val err = nativeStart(dir, host, authKey, controlUrl, preamble.joinToString("") { "%02x".format(it) })
         if (err.isEmpty()) {
             started = true
             startError = null
@@ -102,12 +114,15 @@ object Tailnet {
     fun forward(target: String): Int? {
         if (!started) return null
         val r = nativeForward(target)
-        return if (r.startsWith("port:")) r.removePrefix("port:").toIntOrNull() else null
+        val port = if (r.startsWith("port:")) r.removePrefix("port:").toIntOrNull() else null
+        port?.let { forwardPorts.add(it) }
+        return port
     }
 
     @Synchronized
     fun stop() {
         if (started) nativeStop()
         started = false
+        forwardPorts.clear()
     }
 }

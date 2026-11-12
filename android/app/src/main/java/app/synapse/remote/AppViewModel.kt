@@ -73,6 +73,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    var secureScreen: Boolean
+        get() = store.secureScreen
+        set(v) { store.secureScreen = v }
+
     var fontSp: Int
         get() = store.fontSp
         set(v) { store.fontSp = v }

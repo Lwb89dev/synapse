@@ -27,6 +27,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        applySecureScreen(this, Store(this).secureScreen)
         // Only for a real launch: a rotation re-delivers the same Intent and must not replay it.
         if (savedInstanceState == null) {
             handle(intent)

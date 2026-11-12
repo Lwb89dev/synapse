@@ -39,7 +39,9 @@ func main() {
 			os.Rename(tmp, statusFile)
 		}
 		if s.State == "needs_login" {
-			log.Printf("sign in to add this machine to your tailnet: %s", s.AuthURL)
+			// not the URL itself: whoever opens it first can attach this machine to *their* account, and the
+			// journal is readable by admins. It is in status.json (0600) and `synapse tailnet login`.
+			log.Printf("sign-in needed: run `synapse tailnet login`")
 		} else {
 			log.Printf("tailnet: %s %s %v", s.State, s.DNSName, s.IPs)
 		}

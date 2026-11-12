@@ -227,8 +227,14 @@ def send_keys(sid: str, keys: list[str]) -> None:
 def send_text(sid: str, text: str, submit: bool = True) -> None:
     if text:
         buf = f"synapse-{sid}"
-        tmux("set-buffer", "-b", buf, "--", text, check=True)
-        tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target(sid), check=True)
+        # via stdin, never argv: what the user types (maybe a password) must not show up in /proc/<pid>/cmdline,
+        # which every local user can read
+        tmux("load-buffer", "-b", buf, "-", input_=text, check=True)
+        try:
+            tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target(sid), check=True)
+        except subprocess.CalledProcessError:
+            tmux("delete-buffer", "-b", buf)  # the paste failed: do not leave the text in tmux's buffer list
+            raise
         time.sleep(0.15)  # let the TUI digest the paste before Enter
     if submit:
         tmux("send-keys", "-t", target(sid), "Enter", check=True)
@@ -493,6 +499,9 @@ class Handler(BaseHTTPRequestHandler):
     # -- routing
     def dispatch(self, method: str) -> None:
         if not self.authed():
+            note = getattr(self.server, "note_auth_failure", None)
+            if note:
+                note(self.client_address[0])
             return self.send_json(401, {"error": "unauthorized"})
         path = urllib.parse.urlparse(self.path)
         try:
@@ -617,25 +626,63 @@ class Handler(BaseHTTPRequestHandler):
 
 _count_lock = threading.Lock()
 MAX_CONNECTIONS = 128  # every connection costs a thread; an unauthenticated flood must not exhaust them
+PER_IP_CONNECTIONS = 16  # one LAN host must not be able to take every slot and lock the phone out
+
+
+def security_log(msg: str) -> None:
+    print(f"security: {msg}", file=sys.stderr, flush=True)
 
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     ctx: ssl.SSLContext | None = None
-    active = 0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.active = 0
+        self.per_ip: dict[str, int] = {}
+        # Loopback is the tailnet sidecar (it already filters by account) and adb reverse: never throttled per IP.
+        self.exempt_loopback = True
+        self.auth_failures: dict[str, list] = {}
 
     def verify_request(self, request, client_address) -> bool:
-        return self.active < MAX_CONNECTIONS
+        ip = client_address[0]
+        with _count_lock:  # reserve the slot here, in the accept thread, so a burst cannot overshoot the caps
+            if self.active >= MAX_CONNECTIONS:
+                return False
+            limited = not (self.exempt_loopback and ip in ("127.0.0.1", "::1"))
+            if limited and self.per_ip.get(ip, 0) >= PER_IP_CONNECTIONS:
+                return False
+            self.active += 1
+            self.per_ip[ip] = self.per_ip.get(ip, 0) + 1
+        return True
 
     def process_request_thread(self, request, client_address) -> None:
-        with _count_lock:
-            self.active += 1
         try:
             super().process_request_thread(request, client_address)
         finally:
+            ip = client_address[0]
             with _count_lock:
                 self.active -= 1
+                left = self.per_ip.get(ip, 1) - 1
+                if left > 0:
+                    self.per_ip[ip] = left
+                else:
+                    self.per_ip.pop(ip, None)
+
+    def note_auth_failure(self, ip: str) -> None:
+        """Log failed authentications (at most once a minute per address) so an attack is visible in the journal."""
+        now = time.time()
+        with _count_lock:
+            first, count, logged = self.auth_failures.get(ip, [now, 0, 0.0])
+            count += 1
+            should_log = now - logged >= 60
+            self.auth_failures[ip] = [first, count, now if should_log else logged]
+            if len(self.auth_failures) > 1024:  # bounded memory under a spray of addresses
+                self.auth_failures.pop(next(iter(self.auth_failures)))
+        if should_log:
+            security_log(f"{count} failed authentication(s) from {ip}")
 
     def get_request(self):
         sock, addr = super().get_request()
@@ -773,21 +820,27 @@ def cmd_pair(a) -> None:
     if not hosts:
         sys.exit("synapse: no network address found, pass --host")
     uri = pair_uri(hosts)
+    fp = cert_fingerprint()
+    # The URI carries the token: hand it to qrencode on stdin (argv is world-readable in /proc).
     if a.format == "uri":
         print(uri)
     elif a.format == "svg":
-        sys.stdout.write(subprocess.run(["qrencode", "-t", "SVG", "-o", "-", "-m", "2", uri],
+        sys.stdout.write(subprocess.run(["qrencode", "-t", "SVG", "-o", "-", "-m", "2"], input=uri,
                                         capture_output=True, text=True, check=True).stdout)
     elif a.format == "json":
-        print(json.dumps({"uri": uri, "hosts": hosts}))
+        print(json.dumps({"uri": uri, "hosts": hosts, "fingerprint": fp}))
     else:
         if shutil.which("qrencode"):
-            subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "2", uri])
+            subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "2"], input=uri, text=True)
         else:
-            print("(install `qrencode` to see a QR code here)")
+            print("(install `qrencode` to see a QR code here, or use --show-uri)")
         print(f"\nHosts offered to the phone: {', '.join(hosts)}")
-        print("The QR contains the access token: do not share a screenshot of it.\n")
-        print(uri)
+        print(f"Certificate: {fp[:16]}…  (the app shows the same prefix before pairing: compare them)")
+        print("The QR contains the access token: do not share a screenshot of it.")
+        if a.show_uri:
+            print(f"\n{uri}")
+        else:
+            print("(the link itself is not printed, so it does not stay in your scrollback: --show-uri)")
 
 
 def cmd_run(a) -> None:
@@ -890,6 +943,7 @@ def main() -> None:
     s = sub.add_parser("pair", help="show the QR code to pair the phone")
     s.add_argument("--host", action="append", help="address the phone should use (repeatable)")
     s.add_argument("--format", choices=["ansi", "svg", "uri", "json"], default="ansi")
+    s.add_argument("--show-uri", action="store_true", help="also print the synapse:// link (contains the token)")
     s.set_defaults(fn=cmd_pair)
 
     s = sub.add_parser("run", help="start an agent in a phone-controllable tmux session and attach to it")

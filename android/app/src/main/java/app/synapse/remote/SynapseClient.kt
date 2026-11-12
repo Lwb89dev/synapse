@@ -34,6 +34,11 @@ import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.io.IOException
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.SocketAddress
+import javax.net.SocketFactory
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.CertificateException
@@ -44,6 +49,32 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
 class ApiException(val code: Int, message: String) : Exception(message)
+
+/** Plain sockets, except that a connection to one of our tailnet loopback forwarders starts with its secret. */
+private class PreambleSocket : Socket() {
+    override fun connect(endpoint: SocketAddress, timeout: Int) {
+        super.connect(endpoint, timeout)
+        val a = endpoint as? InetSocketAddress ?: return
+        if (a.address?.isLoopbackAddress == true && Tailnet.isForwardPort(a.port)) {
+            getOutputStream().apply {
+                write(Tailnet.preamble())
+                flush()
+            }
+        }
+    }
+}
+
+private class TailnetAwareSocketFactory : SocketFactory() {
+    override fun createSocket(): Socket = PreambleSocket()
+    override fun createSocket(host: String, port: Int): Socket =
+        PreambleSocket().apply { connect(InetSocketAddress(host, port)) }
+    override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
+        PreambleSocket().apply { bind(InetSocketAddress(localHost, localPort)); connect(InetSocketAddress(host, port)) }
+    override fun createSocket(host: InetAddress, port: Int): Socket =
+        PreambleSocket().apply { connect(InetSocketAddress(host, port)) }
+    override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
+        PreambleSocket().apply { bind(InetSocketAddress(localAddress, localPort)); connect(InetSocketAddress(address, port)) }
+}
 
 /**
  * The bridge uses a self-signed certificate. Instead of a CA we trust exactly one
@@ -70,6 +101,7 @@ class SynapseClient(private val pair: PairInfo) {
         val trust = PinnedTrust(pair.fingerprint)
         val ctx = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(trust), SecureRandom()) }
         OkHttpClient.Builder()
+            .socketFactory(TailnetAwareSocketFactory())
             .sslSocketFactory(ctx.socketFactory, trust)
             .hostnameVerifier { _, _ -> true } // identity is the pinned fingerprint, not the hostname
             // TLS 1.3 only: forward secrecy, no downgrade. The bridge refuses anything older too.

@@ -28,6 +28,11 @@ class Store(context: Context) {
         return true
     }
 
+    /** Keep terminal content out of screenshots, screen recordings and the recents thumbnail (FLAG_SECURE). */
+    var secureScreen: Boolean
+        get() = prefs.getBoolean("secureScreen", true)
+        set(v) = prefs.edit().putBoolean("secureScreen", v).apply()
+
     /** Last bridge event this phone has seen, so a reconnect can ask for what it missed. */
     var lastEventId: Long
         get() = prefs.getLong("lastEventId", 0L)
