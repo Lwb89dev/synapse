@@ -10,3 +10,9 @@ tailnet/synapse-net
 *.jks
 *.keystore
 keystore.properties
+
+# secrets: never commit (e.g. a Nostr nsec in .env)
+.env
+.env.*
+!.env.example
+*.nsec
