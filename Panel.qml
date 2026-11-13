@@ -297,7 +297,7 @@ Panel {
                    : modelData.state === "working" ? "#3e9b4f" : root.dim
             }
             Text {
-              text: modelData.agent + " · " + modelData.id
+              text: modelData.agent + " · " + (modelData.readonly ? (modelData.title || modelData.id) + " (view only)" : modelData.id)
               color: root.foreground
               font.family: root.fontFamily
               elide: Text.ElideRight

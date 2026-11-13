@@ -11,6 +11,10 @@ data class Session(
     val state: String = "idle", // idle | working | needs_input
     val created: Long = 0,
     val activity: Long = 0,
+    /** Friendlier name than [id] (set for mirrors: the project folder). */
+    val title: String = "",
+    /** A mirror of an agent running in a plain terminal on the desktop: shown, but nothing can be typed into it. */
+    val readonly: Boolean = false,
 )
 
 @Serializable
@@ -20,7 +24,7 @@ data class SessionList(val sessions: List<Session> = emptyList())
 data class Cursor(val x: Int = 0, val y: Int = 0, val visible: Boolean = true)
 
 @Serializable
-data class Screen(val text: String = "", val state: String = "idle", val cursor: Cursor? = null)
+data class Screen(val text: String = "", val state: String = "idle", val cursor: Cursor? = null, val readonly: Boolean = false)
 
 /** A one-tap answer a notification may offer, e.g. Yes = keys ["y","Enter"]. Decided by the bridge. */
 @Serializable

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — 2026-11-13
+
+- **See what the agent is doing on the PC, even when Synapse did not start it.** Claude Code and Codex running in a plain
+  terminal now appear in the app (and in the bar widget) as view-only mirrors, rendered from their on-disk transcripts:
+  messages, tool calls and the start of their output, live, with working / idle / needs-you state and notifications
+  (Claude Code reports what it is waiting for). Nothing can be typed into a mirror; `synapse run` is still the way to
+  drive an agent. `"mirror": false` in `config.json` disables it. The ids `ext-*` are reserved for mirrors. The app
+  (this release) shows them wrapped to the phone width, without keys or input box; update the bridge too (`synapse` is
+  re-linked by `install.sh`): an old app lists mirrors but offers input boxes that the bridge refuses (HTTP 409).
+- `synapse.service` now has `KillMode=process`: restarting or upgrading the bridge no longer kills the agents' tmux sessions
+  (they live in the unit's cgroup). Stopping the bridge leaves them running; `synapse kill <id>` ends one.
+
 ## 0.2.0 — 2026-11-12
 
 First public release: the Omarchy plugin, the desktop backend and the Android app.

@@ -60,6 +60,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -306,7 +307,7 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
             }
             if (sessions.isEmpty() && error == null) {
                 Text(
-                    "no sessions\n\n$ synapse run claude\n  …or tap  $ new",
+                    "no agents running\n\n$ synapse run claude   (drive it from here)\n  …or tap  $ new\n\nClaude Code and Codex running in a plain\nterminal show up here too, view only.",
                     modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -320,13 +321,14 @@ fun SessionsScreen(vm: AppViewModel, onOpen: (String) -> Unit) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(stateGlyph(s.state), color = stateColor(s.state))
                                 Text(
-                                    "  ${s.agent}  ${s.id}", Modifier.weight(1f), maxLines = 1,
+                                    "  ${s.agent}  ${s.title.ifBlank { s.id }}", Modifier.weight(1f), maxLines = 1,
                                     style = MaterialTheme.typography.titleSmall,
                                 )
                                 Text("[${s.state.replace('_', ' ')}]", color = stateColor(s.state), style = MaterialTheme.typography.labelMedium)
                             }
                             Text(
-                                s.cwd, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                                if (s.readonly) "view only · ${s.cwd}" else s.cwd,
+                                style = MaterialTheme.typography.bodySmall, maxLines = 1,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -436,7 +438,10 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val dark = isSystemInDarkTheme()
 
-    var screen by remember { mutableStateOf(Screen()) }
+    val known = remember(id) { vm.sessions.value.firstOrNull { it.id == id } }
+    var screen by remember { mutableStateOf(Screen(readonly = known?.readonly == true)) }
+    val readonly = screen.readonly
+    val readonlyNow by rememberUpdatedState(readonly)
     var live by remember { mutableStateOf(false) }
     var ended by remember { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
@@ -494,13 +499,13 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
     var refit by remember { mutableIntStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_START) { refit++ }
     // Phone in the pocket: give the desktop terminal its size back; fit again when we return.
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.releaseSize(id) }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { if (!readonlyNow) vm.releaseSize(id) }
     LaunchedEffect(cols, fit, refit) {
-        if (cols < 20) return@LaunchedEffect
+        if (cols < 20 || readonlyNow) return@LaunchedEffect
         delay(250)
         runCatching { if (fit) client.resize(id, cols, FIT_ROWS) else client.resizeAuto(id) }
     }
-    DisposableEffect(id) { onDispose { vm.releaseSize(id) } }
+    DisposableEffect(id) { onDispose { if (!readonlyNow) vm.releaseSize(id) } }
 
     // Stick to the bottom unless the user scrolled up to read history.
     LaunchedEffect(vscroll.value) { follow = vscroll.value >= vscroll.maxValue - 48 }
@@ -536,7 +541,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
             TopAppBar(
                 title = {
                     Column {
-                        Text(id, maxLines = 1, style = MaterialTheme.typography.titleMedium)
+                        Text(known?.title?.ifBlank { null } ?: id, maxLines = 1, style = MaterialTheme.typography.titleMedium)
                         val sc = stateColor(screen.state)
                         Text(
                             buildAnnotatedString {
@@ -547,7 +552,8 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                                 withStyle(SpanStyle(color = if (ended) cs.onSurfaceVariant else sc)) {
                                     append(if (ended) "closed" else screen.state.replace('_', ' '))
                                 }
-                                if (fit && cols > 0) withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · $cols×$FIT_ROWS") }
+                                if (readonly) withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · view only") }
+                                else if (fit && cols > 0) withStyle(SpanStyle(color = cs.onSurfaceVariant)) { append(" · $cols×$FIT_ROWS") }
                             },
                             style = MaterialTheme.typography.labelSmall, maxLines = 1,
                         )
@@ -558,7 +564,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                     Box {
                         TextButton(onClick = { menu = true }) { Text("⋮") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(
+                            if (!readonly) DropdownMenuItem(
                                 text = { Text("Fit to phone") },
                                 leadingIcon = { Checkbox(checked = fit, onCheckedChange = null) },
                                 onClick = { fit = !fit; menu = false },
@@ -571,7 +577,7 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                                 text = { Text("Font smaller") },
                                 onClick = { fontSp = (fontSp - 1).coerceAtLeast(7); vm.fontSp = fontSp },
                             )
-                            DropdownMenuItem(text = { Text("Kill session") }, onClick = { menu = false; confirmKill = true })
+                            if (!readonly) DropdownMenuItem(text = { Text("Kill session") }, onClick = { menu = false; confirmKill = true })
                         }
                     }
                 },
@@ -587,9 +593,11 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                 val newCols = (usablePx / charPx).toInt()
                 LaunchedEffect(newCols) { cols = newCols }
                 Box(
-                    Modifier.fillMaxSize().verticalScroll(vscroll).horizontalScroll(hscroll).padding(10.dp),
+                    Modifier.fillMaxSize().verticalScroll(vscroll)
+                        .then(if (readonly) Modifier else Modifier.horizontalScroll(hscroll)).padding(10.dp),
                 ) {
-                    Text(styled, style = termStyle, color = palette.fg, softWrap = false)
+                    // a mirror is a transcript, not a terminal grid: let it wrap to the phone
+                    Text(styled, style = termStyle, color = palette.fg, softWrap = readonly)
                 }
             }
 
@@ -597,34 +605,44 @@ fun TerminalScreen(vm: AppViewModel, id: String, onBack: () -> Unit) {
                 Text(it, color = cs.error, modifier = Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
             }
 
-            Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                KEY_ROWS.forEach { keys ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        keys.forEach { (label, key) ->
-                            FilledTonalButton(
-                                onClick = { run { client.keys(id, listOf(key)) }; follow = true },
-                                enabled = !ended,
-                                modifier = Modifier.weight(1f).height(40.dp), contentPadding = PaddingValues(0.dp),
-                                shape = RoundedCornerShape(10.dp),
-                            ) { Text(label, fontFamily = Mono, fontSize = 13.sp, maxLines = 1) }
+            if (readonly) {
+                Text(
+                    if (screen.state == "needs_input") "Waiting for you — answer it on the desktop."
+                    else "View only: this agent runs in a plain terminal. Start it with `synapse run` to drive it from here.",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (screen.state == "needs_input") cs.error else cs.onSurfaceVariant,
+                )
+            } else {
+                Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    KEY_ROWS.forEach { keys ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            keys.forEach { (label, key) ->
+                                FilledTonalButton(
+                                    onClick = { run { client.keys(id, listOf(key)) }; follow = true },
+                                    enabled = !ended,
+                                    modifier = Modifier.weight(1f).height(40.dp), contentPadding = PaddingValues(0.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                ) { Text(label, fontFamily = Mono, fontSize = 13.sp, maxLines = 1) }
+                            }
                         }
                     }
                 }
-            }
 
-            TextField(
-                value = input, onValueChange = { input = it },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = TextFieldDefaults.colors(focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
-                enabled = !ended,
-                prefix = { Text("❯ ", color = cs.primary, fontWeight = FontWeight.Bold) },
-                placeholder = { Text("message the agent") },
-                trailingIcon = { TextButton(onClick = { sendInput() }, enabled = input.isNotBlank()) { Text("⏎") } },
-                maxLines = 4,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { sendInput() }),
-            )
+                TextField(
+                    value = input, onValueChange = { input = it },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = TextFieldDefaults.colors(focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
+                    enabled = !ended,
+                    prefix = { Text("❯ ", color = cs.primary, fontWeight = FontWeight.Bold) },
+                    placeholder = { Text("message the agent") },
+                    trailingIcon = { TextButton(onClick = { sendInput() }, enabled = input.isNotBlank()) { Text("⏎") } },
+                    maxLines = 4,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { sendInput() }),
+                )
+            }
         }
     }
 

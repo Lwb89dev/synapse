@@ -37,6 +37,11 @@ The token and the pin both travel only in the pairing QR/link; treat that QR lik
   answer: read it before tapping.
 * **Other apps can open the app on a given session** (the launcher activity must be exported for links). That only
   navigates: it cannot send keys.
+* **View-only mirrors read agents' transcripts.** For Claude Code / Codex running outside Synapse, the bridge (your user,
+  no extra privilege) reads `~/.claude` and `~/.codex` and sends the recent conversation, tool calls and the start of tool
+  output to the paired phone: the same trust as the live terminal screen, but a transcript can include output that has
+  scrolled off the terminal. Escape sequences and control characters are stripped, a mirror accepts no input (HTTP 409 on
+  input/keys/resize/delete), and `"mirror": false` in `config.json` switches it off.
 * **The agent runs with your privileges.** A phone that can answer an agent's prompt can approve whatever that
   prompt asks. The one-tap guard prevents answering the *wrong* prompt, not approving a bad one.
 * Debug builds are `debuggable` (adb `run-as` can read app data). Use a signed release build for daily use (see README);

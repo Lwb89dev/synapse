@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.lwb89dev.synapse",
   "name": "Synapse",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Lwb89dev",
   "license": "MIT",
   "description": "Control your terminal AI agents (Claude Code, Codex, Kimi, Grok) from an Android phone. Bar widget with live sessions, a \"needs you\" badge and a pairing QR; the backend and the Android app live in the same repository.",

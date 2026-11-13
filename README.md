@@ -19,6 +19,7 @@ one-tap answers on the notification. Works at home, over USB, or anywhere throug
 
 Agents run inside **tmux**. The bridge captures the pane and types keys into it, so no per-agent integration is needed,
 and you can keep working in the same session from your terminal (`synapse attach`, or `synapse run` attaches for you).
+Claude Code / Codex started in a plain terminal are visible too, as a view-only mirror of their transcript (see below).
 
 ## What is in this repository
 
@@ -134,6 +135,20 @@ the first attempt under Mullvad). Android quirks handled in `tailnet/jni`: no ne
 no log dir (`TS_LOGS_DIR`), 16 kB-aligned ELF for Android 15+/Pixel 10. Building needs Go (`mise exec go@latest` works)
 and the Android NDK; the APK gains ~22 MB (arm64 only). Tailscale's code is BSD-3-Clause.
 
+### See agents that were not started by Synapse (view-only mirror)
+
+You do not have to start an agent with `synapse run` to *watch* it. **Claude Code and Codex running in any plain
+terminal** on the desktop show up in the app next to the normal sessions, marked "view only": the bridge finds the process
+and renders its on-disk conversation transcript (`~/.claude/projects`, `~/.codex/sessions`): your prompts, the agent's
+messages, the commands/tools it runs and the start of their output, live. The state (working / idle / needs you) and the
+"needs you" / "done" notifications work the same; a Claude Code waiting for a permission says what it waits for.
+
+It is **read-only**: there is no way to type into a terminal Synapse does not own. To answer or steer from the phone,
+start the agent with `synapse run claude` (or from the app's `$ new`). Mirrors are not offered for other agents (kimi, grok:
+no transcript format to read), nor for agents already running inside a synapse tmux session (those are the full view).
+`"mirror": false` in `config.json` turns the feature off. Transcripts can contain whatever the agent printed, so the phone
+sees the same as it would on the terminal screen: see [SECURITY.md](SECURITY.md).
+
 ### Answer from the notification
 
 When an agent waits for you, the notification can carry **one-tap answers** chosen by the bridge from the prompt on
@@ -171,6 +186,8 @@ permission to use Bash") instead of the screen heuristic.
 ```json
 { "port": 7433, "host": "0.0.0.0", "agents": { "aider": "aider --model sonnet", "claude-yolo": "claude --foo" } }
 ```
+
+`"mirror": false` disables the view-only mirrors of agents started outside Synapse.
 
 `"host": "127.0.0.1"` stops the bridge from listening on the LAN: it is then reachable only through the tailnet
 (`synapse-net` forwards to loopback) or USB (`adb reverse`).

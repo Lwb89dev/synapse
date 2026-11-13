@@ -185,6 +185,34 @@ class MalformedRequests(ServerCase):
         self.assertTrue(self.alive())
 
 
+class MirrorIsReadOnly(ServerCase):
+    """An agent running in a plain terminal is shown from its transcript; nothing may be typed into it or killed."""
+
+    def setUp(self):
+        syn.HUB.snap["ext-claude-1"] = {"text": "hello", "state": "idle", "agent": "claude", "version": 1, "readonly": True}
+
+    def tearDown(self):
+        syn.HUB.snap.pop("ext-claude-1", None)
+
+    def test_it_can_be_read(self):
+        t = self.token
+        code, body = self.call("GET", "/api/sessions/ext-claude-1/screen", t)
+        self.assertEqual(code, 200)
+        self.assertTrue(json.loads(body)["readonly"])
+        sessions = json.loads(self.call("GET", "/api/sessions", t)[1])["sessions"]
+        self.assertTrue([s for s in sessions if s["id"] == "ext-claude-1"][0]["readonly"])
+
+    def test_it_cannot_be_driven_or_killed(self):
+        t = self.token
+        for method, path, body in [("POST", "/api/sessions/ext-claude-1/input", {"text": "rm -rf ~"}),
+                                   ("POST", "/api/sessions/ext-claude-1/keys", {"keys": ["Enter"]}),
+                                   ("POST", "/api/sessions/ext-claude-1/resize", {"cols": 40, "rows": 20}),
+                                   ("DELETE", "/api/sessions/ext-claude-1", None)]:
+            self.assertEqual(self.call(method, path, t, body=body)[0], 409, f"{method} {path}")
+        self.assertEqual(self.call("POST", "/api/sessions", t, body={"agent": "claude", "name": "ext-x"})[0], 400)
+        self.assertEqual(self.call("GET", "/api/sessions/ext-nope/screen", t)[0], 404)
+
+
 class TransportSecurity(ServerCase):
     def test_tls_below_1_3_is_refused(self):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)

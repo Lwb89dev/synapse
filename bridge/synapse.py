@@ -29,8 +29,9 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PREFIX = "synapse-"
+EXT_PREFIX = "ext-"  # ids of read-only mirrors (agents running outside tmux); never a tmux session id
 DEFAULT_PORT = 7433
 CONFIG_DIR = Path(os.environ.get("SYNAPSE_CONFIG_DIR", Path.home() / ".config" / "synapse"))
 DEFAULT_AGENTS = {"claude": "claude", "codex": "codex", "kimi": "kimi", "grok": "grok"}
@@ -40,11 +41,12 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
 
 
 def load_config() -> dict:
-    cfg = {"port": DEFAULT_PORT, "host": "0.0.0.0", "agents": dict(DEFAULT_AGENTS)}
+    cfg = {"port": DEFAULT_PORT, "host": "0.0.0.0", "agents": dict(DEFAULT_AGENTS), "mirror": True}
     try:
         user = json.loads((CONFIG_DIR / "config.json").read_text())
         cfg["port"] = int(user.get("port", cfg["port"]))
         cfg["host"] = str(user.get("host", cfg["host"]))
+        cfg["mirror"] = bool(user.get("mirror", cfg["mirror"]))
         cfg["agents"].update(user.get("agents", {}))
     except (OSError, ValueError):
         pass
@@ -135,7 +137,7 @@ def list_sessions() -> list[dict]:
         return out
     for line in r.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) < 5 or not parts[0].startswith(PREFIX):
+        if len(parts) < 5 or not parts[0].startswith(PREFIX) or parts[0][len(PREFIX):].startswith(EXT_PREFIX):
             continue
         out.append({"id": parts[0][len(PREFIX):], "agent": parts[1], "created": int(parts[2] or 0),
                     "activity": int(parts[3] or 0), "cwd": parts[4]})
@@ -186,8 +188,8 @@ def create_session(agent: str, cwd: str | None = None, name: str | None = None,
     if not os.path.isdir(workdir):
         raise ValueError(f"not a directory: {workdir}")
     if name:
-        if not ID_RE.fullmatch(name):
-            raise ValueError("invalid session name")
+        if not ID_RE.fullmatch(name) or name.startswith(EXT_PREFIX):
+            raise ValueError(f"invalid session name (\"{EXT_PREFIX}\" is reserved)")
         sid = name
     else:
         base = re.sub(r"[^A-Za-z0-9_.-]", "-", os.path.basename(workdir.rstrip("/")) or "home")[:24]
@@ -306,6 +308,370 @@ def attention_message(text: str) -> str:
     return "Waiting for input"
 
 
+# ---------------------------------------------------------------- agents outside tmux (read-only mirror)
+#
+# An agent started in a plain terminal has no pane the bridge could capture. But Claude Code and Codex both keep a
+# transcript of the conversation on disk, so the bridge can still show what they are doing: a *mirror*, rendered from
+# the transcript, read-only (there is no way to type into somebody else's terminal). Agents started with
+# `synapse run` (or from the app) stay full tmux sessions.
+
+AGENT_PROCS = ("claude", "codex")
+SGR_RESET, SGR_BOLD, SGR_DIM = "\x1b[0m", "\x1b[1m", "\x1b[2m"
+SGR_RED, SGR_GREEN, SGR_CYAN = "\x1b[31m", "\x1b[32m", "\x1b[36m"
+TAIL_BYTES = 600_000  # how much of a transcript's end is parsed: enough for the recent conversation
+MAX_MIRROR_CHARS = 40_000
+CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def claude_dir() -> Path:
+    return Path(os.environ.get("SYNAPSE_CLAUDE_DIR") or Path.home() / ".claude")
+
+
+def codex_dir() -> Path:
+    return Path(os.environ.get("SYNAPSE_CODEX_DIR") or Path.home() / ".codex")
+
+
+def clean(text: str) -> str:
+    """Transcript text is untrusted terminal output: no escape sequences or control characters on the phone."""
+    return CTRL_RE.sub("", strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def clip(text: str, n: int) -> str:
+    text = text.strip()
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def read_tail(path: Path, nbytes: int = TAIL_BYTES) -> list[dict]:
+    """The JSON objects of the last `nbytes` of a JSON-lines file (a partial first line is dropped)."""
+    try:
+        with open(path, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - nbytes))
+            data = f.read()
+            partial = size > nbytes
+    except OSError:
+        return []
+    lines = data.split(b"\n")
+    if partial:
+        lines = lines[1:]
+    out = []
+    for raw in lines:
+        raw = raw.strip()
+        if not raw.startswith(b"{"):
+            continue
+        try:
+            out.append(json.loads(raw))
+        except ValueError:
+            continue  # the last line may still be being written
+    return out
+
+
+def result_lines(text: str, width: int = 200, limit: int = 4) -> list[str]:
+    """The first lines of a tool result, as the dim `⎿` block under the call."""
+    lines = [l.rstrip() for l in clean(text).split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    if not lines:
+        return []
+    out = [f"{SGR_DIM}  ⎿ {clip(lines[0], width)}{SGR_RESET}"]
+    out += [f"{SGR_DIM}    {clip(l, width)}{SGR_RESET}" for l in lines[1:limit]]
+    if len(lines) > limit:
+        out.append(f"{SGR_DIM}    … +{len(lines) - limit} lines{SGR_RESET}")
+    return out
+
+
+def say(who: str, text: str) -> list[str]:
+    text = clean(text).strip()
+    if not text:
+        return []
+    mark = f"{SGR_BOLD}{SGR_CYAN}❯{SGR_RESET} " if who == "user" else f"{SGR_BOLD}●{SGR_RESET} "
+    lines = text.split("\n")
+    body = ([mark + (SGR_BOLD if who == "user" else "") + lines[0] + (SGR_RESET if who == "user" else "")]
+            + [("  " + l) for l in lines[1:]])
+    return body + [""]
+
+
+def tool_call(name: str, arg: str) -> str:
+    arg = clip(clean(arg).replace("\n", " ⏎ "), 110)
+    if name == "$":  # a shell command
+        return f"{SGR_BOLD}{SGR_GREEN}⏺{SGR_RESET} {SGR_BOLD}${SGR_RESET} {arg}"
+    return f"{SGR_BOLD}{SGR_GREEN}⏺{SGR_RESET} {SGR_BOLD}{clean(name)}{SGR_RESET}{SGR_DIM}({SGR_RESET}{arg}{SGR_DIM}){SGR_RESET}"
+
+
+def claude_tool_arg(inp) -> str:
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("command", "file_path", "pattern", "path", "url", "query", "description", "prompt", "skill", "subject"):
+        v = inp.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    for v in inp.values():
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""
+
+
+CLAUDE_NOISE_RE = re.compile(r"^\s*<(local-command-caveat|system-reminder|task-notification|command-message)\b")
+
+
+def claude_user_text(text: str) -> list[str]:
+    m = re.search(r"<command-name>\s*(/[^<\s]+)\s*</command-name>(?:.*?<command-args>(.*?)</command-args>)?", text, re.S)
+    if m:
+        return say("user", (m.group(1) + " " + (m.group(2) or "")).strip())
+    m = re.search(r"<local-command-stdout>(.*?)</local-command-stdout>", text, re.S)
+    if m:
+        return result_lines(m.group(1)) + [""] if m.group(1).strip() else []
+    if CLAUDE_NOISE_RE.match(text):
+        return []
+    return say("user", text)
+
+
+def render_claude(events: list[dict]) -> list[str]:
+    out: list[str] = []
+    for ev in events:
+        if ev.get("type") not in ("user", "assistant") or ev.get("isSidechain") or ev.get("isMeta"):
+            continue
+        content = (ev.get("message") or {}).get("content")
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            blocks = [b for b in content if isinstance(b, dict)]
+        else:
+            continue
+        for b in blocks:
+            kind = b.get("type")
+            if kind == "text" and isinstance(b.get("text"), str):
+                out += claude_user_text(b["text"]) if ev["type"] == "user" else say("assistant", b["text"])
+            elif kind == "tool_use":
+                out.append(tool_call(str(b.get("name", "tool")), claude_tool_arg(b.get("input"))))
+            elif kind == "tool_result":
+                c = b.get("content")
+                text = c if isinstance(c, str) else "\n".join(x.get("text", "") for x in c if isinstance(x, dict)) \
+                    if isinstance(c, list) else ""
+                lines = result_lines(text)
+                if b.get("is_error") and lines:
+                    lines[0] = lines[0].replace(SGR_DIM, SGR_RED, 1)
+                out += lines + ([""] if lines else [])
+            elif kind == "image":
+                out += [f"{SGR_DIM}[image]{SGR_RESET}", ""]
+    return out
+
+
+def codex_command(cmd) -> str:
+    if isinstance(cmd, list) and cmd:
+        if len(cmd) >= 3 and str(cmd[1]) in ("-lc", "-c") and os.path.basename(str(cmd[0])) in ("bash", "sh", "zsh"):
+            return str(cmd[2])
+        return " ".join(str(c) for c in cmd)
+    return str(cmd or "")
+
+
+def render_codex(events: list[dict]) -> tuple[list[str], bool | None]:
+    """Lines plus whether a turn is open at the end of what was read (None: no turn marker in that window)."""
+    out: list[str] = []
+    working: bool | None = None
+    for ev in events:
+        if ev.get("type") != "event_msg":
+            continue
+        p = ev.get("payload") or {}
+        kind = str(p.get("type", ""))
+        if kind == "task_started":
+            working = True
+        elif kind == "task_complete" or "abort" in kind or "interrupt" in kind:
+            working = False
+        if kind != "item_completed":
+            continue
+        it = p.get("item") or {}
+        t = it.get("type")
+        if t == "UserMessage":
+            out += say("user", "\n".join(str(c.get("text", "")) for c in it.get("content") or [] if isinstance(c, dict)))
+        elif t == "AgentMessage":
+            out += say("assistant", "\n".join(str(c.get("text", "")) for c in it.get("content") or [] if isinstance(c, dict)))
+        elif t == "CommandExecution":
+            out.append(tool_call("$", codex_command(it.get("command"))))
+            lines = result_lines(str(it.get("aggregated_output") or ""))
+            failed = str(it.get("status", "")).lower() in ("failed", "error") or it.get("exit_code") not in (None, 0)
+            if failed and not lines:
+                lines = [f"{SGR_RED}  ⎿ failed{SGR_RESET}"]
+            elif failed:
+                lines[0] = lines[0].replace(SGR_DIM, SGR_RED, 1)
+            out += lines + ([""] if lines else [])
+        elif t == "FileChange":
+            ch = it.get("changes") or {}
+            names = [f"{(v or {}).get('type', 'edit')} {os.path.basename(k)}" for k, v in list(ch.items())[:3]]
+            more = f" +{len(ch) - 3}" if len(ch) > 3 else ""
+            out += [tool_call("Edit", ", ".join(names) + more), ""]
+    return out, working
+
+
+def start_time(pid: int) -> float | None:
+    """Process start as epoch seconds (from /proc/<pid>/stat field 22 and the boot time)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        ticks = int(stat[stat.rindex(")") + 2:].split()[19])
+        btime = next(int(l.split()[1]) for l in Path("/proc/stat").read_text().splitlines() if l.startswith("btime"))
+        return btime + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, StopIteration, IndexError):
+        return None
+
+
+def agent_name(argv: list[bytes]) -> str | None:
+    """`claude` / `codex` from a command line: the binary itself, or an npm install run as `node …/claude(.js)`."""
+    names = [os.path.basename(a.decode("utf-8", "replace")) for a in argv[:2]]
+    if names[0] in AGENT_PROCS:
+        return names[0]
+    if names[0] in ("node", "bun", "nodejs") and len(names) > 1 and names[1].removesuffix(".js") in AGENT_PROCS:
+        return names[1].removesuffix(".js")
+    return None
+
+
+def agent_processes() -> list[dict]:
+    """Interactive claude/codex processes of this user, outside any synapse tmux session."""
+    me, out = os.getuid(), []
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            if d.stat().st_uid != me:
+                continue
+            argv = (d / "cmdline").read_bytes().split(b"\0")
+            agent = agent_name(argv)
+            if not agent:
+                continue
+            stat = (d / "stat").read_text()
+            tty = int(stat[stat.rindex(")") + 2:].split()[4])
+            if tty == 0:  # no controlling terminal: app-server, MCP server, `exec` runs... not a session someone watches
+                continue
+            if b"SYNAPSE_SESSION=" in (d / "environ").read_bytes():
+                continue  # runs in a synapse tmux session: that is the full, controllable view
+            out.append({"pid": int(d.name), "agent": agent, "cwd": os.readlink(d / "cwd")})
+        except (OSError, ValueError, IndexError):
+            continue
+    return out
+
+
+def claude_transcript(proc: dict, started: float | None) -> dict:
+    """Locate a running Claude Code's transcript: ~/.claude/sessions/<pid>.json names its session id and status."""
+    home = claude_dir()
+    info: dict = {}
+    try:
+        info = json.loads((home / "sessions" / f"{proc['pid']}.json").read_text())
+    except (OSError, ValueError):
+        pass
+    sid = info.get("sessionId") if isinstance(info.get("sessionId"), str) else None
+    path = None
+    if sid and re.fullmatch(r"[A-Za-z0-9-]{8,64}", sid):
+        guess = home / "projects" / re.sub(r"[^A-Za-z0-9]", "-", info.get("cwd") or proc["cwd"]) / f"{sid}.jsonl"
+        path = guess if guess.exists() else next(iter((home / "projects").glob(f"*/{sid}.jsonl")), None)
+    elif started is not None:  # an older Claude Code that does not write sessions/<pid>.json
+        proj = home / "projects" / re.sub(r"[^A-Za-z0-9]", "-", proc["cwd"])
+        files = [f for f in proj.glob("*.jsonl") if f.stat().st_mtime >= started - 5] if proj.is_dir() else []
+        path = max(files, key=lambda f: f.stat().st_mtime, default=None)
+    return {"path": path, "status": str(info.get("status") or ""), "waiting": str(info.get("waitingFor") or ""),
+            "name": str(info.get("name") or "")}
+
+
+_CODEX_CWD_RE = re.compile(rb'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def codex_candidates(days: int = 3) -> list[tuple[float, Path, str]]:
+    """Recent Codex rollouts as (mtime, path, cwd), newest first."""
+    root, out = codex_dir() / "sessions", []
+    try:
+        day_dirs = sorted((d for y in root.iterdir() for m in y.iterdir() for d in m.iterdir() if d.is_dir()))[-days:]
+    except OSError:
+        return []
+    for d in day_dirs:
+        for f in d.glob("rollout-*.jsonl"):
+            try:
+                with open(f, "rb") as fh:
+                    m = _CODEX_CWD_RE.search(fh.read(262_144))
+                out.append((f.stat().st_mtime, f, json.loads(b'"' + m.group(1) + b'"') if m else ""))
+            except (OSError, ValueError):
+                continue
+    return sorted(out, reverse=True)
+
+
+class Mirror:
+    """Finds agents running outside tmux and renders their transcripts. Poll it often: it re-scans /proc every few
+    seconds and re-renders a transcript only when the file changed."""
+
+    SCAN_EVERY = 3.0
+
+    def __init__(self) -> None:
+        self.scanned = 0.0
+        self.procs: list[dict] = []
+        self.cache: dict[str, tuple] = {}  # path -> (stamp, lines, working)
+
+    def render(self, path: Path, agent: str) -> tuple[list[str], bool | None]:
+        try:
+            st = path.stat()
+        except OSError:
+            return [], None
+        stamp = (st.st_mtime_ns, st.st_size)
+        hit = self.cache.get(str(path))
+        if hit and hit[0] == stamp:
+            return hit[1], hit[2]
+        events = read_tail(path)
+        lines, working = (render_claude(events), None) if agent == "claude" else render_codex(events)
+        self.cache[str(path)] = (stamp, lines, working)
+        return lines, working
+
+    def scan(self, now: float) -> None:
+        procs = agent_processes()
+        claimed: set[Path] = set()
+        cands = codex_candidates() if any(p["agent"] == "codex" for p in procs) else []
+        for p in sorted(procs, key=lambda p: p["pid"]):
+            started = start_time(p["pid"])
+            p["started"] = started or now
+            p["path"], p["status"], p["waiting"], p["name"] = None, "", "", ""
+            if p["agent"] == "claude":
+                p.update(claude_transcript(p, started))
+            else:
+                for mtime, path, cwd in cands:
+                    if cwd == p["cwd"] and path not in claimed and (started is None or mtime >= started - 5):
+                        p["path"] = path
+                        claimed.add(path)
+                        break
+        self.procs, self.scanned = procs, now
+        live = {str(p["path"]) for p in procs if p["path"]}
+        for k in [k for k in self.cache if k not in live]:
+            del self.cache[k]
+
+    def poll(self, now: float) -> list[dict]:
+        """Current mirrors: {id, meta, text, state, waiting}."""
+        if now - self.scanned >= self.SCAN_EVERY:
+            self.scan(now)
+        out = []
+        for p in self.procs:
+            path, agent = p["path"], p["agent"]
+            lines, working = self.render(path, agent) if path else ([], None)
+            try:
+                mtime = path.stat().st_mtime if path else p["started"]
+            except OSError:
+                mtime = p["started"]
+            title = p["name"] or os.path.basename(p["cwd"].rstrip("/")) or "home"
+            head = f"{SGR_DIM}{agent} · {p['cwd']} · pid {p['pid']}\nread-only view of the agent running in a terminal on the desktop{SGR_RESET}"
+            if not path:
+                lines = [f"{SGR_DIM}No conversation yet.{SGR_RESET}"]
+            body = "\n".join(lines).rstrip("\n")
+            if len(body) > MAX_MIRROR_CHARS:
+                body = body[-MAX_MIRROR_CHARS:].split("\n", 1)[-1]
+            recent = now - mtime < 3
+            if agent == "claude" and p["status"] == "waiting":
+                state = "needs_input"
+            elif agent == "claude" and p["status"] in ("busy", "idle"):
+                state = "working" if p["status"] == "busy" else "idle"  # Claude Code says it itself
+            elif working is True and now - mtime < 600:
+                state = "working"
+            else:
+                state = "working" if recent else "idle"
+            out.append({"id": f"{EXT_PREFIX}{agent}-{p['pid']}", "state": state, "waiting": p["waiting"],
+                        "text": head + "\n\n" + body,
+                        "meta": {"agent": agent, "cwd": p["cwd"], "created": int(p["started"]),
+                                 "activity": int(mtime), "title": title, "readonly": True}})
+        return out
+
+
 # ---------------------------------------------------------------- monitor + event bus
 
 
@@ -318,6 +684,7 @@ class Hub:
         self.events: list[dict] = []
         self.next_id = int(time.time() * 1000)  # monotonic across bridge restarts: clients can resume with Last-Event-ID
         self.version = 0
+        self.mirror = Mirror()
 
     def emit(self, type_: str, session: str, **kw) -> dict:
         with self.cv:
@@ -328,10 +695,10 @@ class Hub:
             self.cv.notify_all()
             return ev
 
-    def emit_attention(self, sid: str, agent: str, message: str, plain: str) -> None:
+    def emit_attention(self, sid: str, agent: str, message: str, plain: str, actions: list | None = None) -> None:
         """An attention event with the one-tap answers valid for the prompt on screen right now."""
         ev = self.emit("attention", sid, agent=agent, state="needs_input", message=message,
-                       actions=prompt_actions(plain))
+                       actions=prompt_actions(plain) if actions is None else actions)
         with self.cv:
             s = self.snap.get(sid)
             if s is not None:
@@ -355,13 +722,17 @@ class Hub:
 
     def tick(self) -> None:
         now = time.time()
-        live = {s["id"]: s for s in list_sessions()}
-        for sid, meta in live.items():
+        # id -> (meta, screen text, cursor, forced state or None, what an external agent waits for)
+        live: dict[str, tuple] = {}
+        for sid, meta in {s["id"]: s for s in list_sessions()}.items():
             text = capture(sid)
-            if text is None:
-                continue
+            if text is not None:
+                live[sid] = (meta, text, cursor_info(sid), None, "")
+        if load_config()["mirror"]:
+            for m in self.mirror.poll(now):
+                live[m["id"]] = (m["meta"], m["text"], None, m["state"], m["waiting"])
+        for sid, (meta, text, cursor, forced, waiting) in live.items():
             plain = strip_ansi(text)
-            cursor = cursor_info(sid)
             digest = hashlib.sha1((text + repr(cursor)).encode()).hexdigest()
             with self.cv:
                 s = self.snap.get(sid)
@@ -371,18 +742,22 @@ class Hub:
             changed = digest != s["hash"]
             if changed:
                 s["hash"], s["changed"] = digest, now
-            state = detect_state(plain, now - s["changed"] < 2.5 and s["state"] is not None)
+            state = forced or detect_state(plain, now - s["changed"] < 2.5 and s["state"] is not None)
             prev = s["state"]
             with self.cv:
                 if changed or state != prev:
                     self.version += 1
                     s.update(text=text, state=state, cursor=cursor, version=self.version)
-                s.update(agent=meta["agent"], cwd=meta["cwd"], created=meta["created"], activity=meta["activity"])
+                s.update(agent=meta["agent"], cwd=meta["cwd"], created=meta["created"], activity=meta["activity"],
+                         title=meta.get("title", ""), readonly=bool(meta.get("readonly")))
                 self.cv.notify_all()
             if state != prev:
                 self.emit("state", sid, agent=meta["agent"], state=state)
                 if state == "needs_input":
-                    self.emit_attention(sid, meta["agent"], attention_message(plain), plain)
+                    if forced:  # a mirror: the agent says what it waits for; nothing can be answered from here
+                        self.emit_attention(sid, meta["agent"], waiting or "Waiting for you", plain, actions=[])
+                    else:
+                        self.emit_attention(sid, meta["agent"], attention_message(plain), plain)
                 if state == "working":
                     s["working_since"] = now
                 elif state == "idle" and prev == "working" and s["working_since"] and now - s["working_since"] >= 8:
@@ -398,13 +773,27 @@ class Hub:
     def sessions(self) -> list[dict]:
         with self.cv:
             return [{"id": sid, "agent": s.get("agent", ""), "cwd": s.get("cwd", ""), "state": s["state"] or "idle",
-                     "created": s.get("created", 0), "activity": s.get("activity", 0)}
+                     "created": s.get("created", 0), "activity": s.get("activity", 0),
+                     "title": s.get("title", ""), "readonly": bool(s.get("readonly"))}
                     for sid, s in sorted(self.snap.items())]
+
+    def is_mirror(self, sid: str) -> bool:
+        with self.cv:
+            return bool(self.snap.get(sid, {}).get("readonly"))
+
+    def exists(self, sid: str) -> bool:
+        with self.cv:
+            return sid in self.snap
 
     def screen(self, sid: str) -> dict | None:
         with self.cv:
             s = self.snap.get(sid)
-            return {"text": s["text"], "state": s["state"] or "idle", "cursor": s.get("cursor")} if s else None
+            return self._frame(s) if s else None
+
+    @staticmethod
+    def _frame(s: dict) -> dict:
+        return {"text": s["text"], "state": s["state"] or "idle", "cursor": s.get("cursor"),
+                "readonly": bool(s.get("readonly"))}
 
     def wait_screen(self, sid: str, version: int, timeout: float) -> tuple[dict | None, int]:
         with self.cv:
@@ -414,10 +803,10 @@ class Hub:
                 if s is None:
                     return None, version
                 if s["version"] > version:
-                    return {"text": s["text"], "state": s["state"] or "idle", "cursor": s.get("cursor")}, s["version"]
+                    return self._frame(s), s["version"]
                 left = end - time.time()
                 if left <= 0:
-                    return {"text": s["text"], "state": s["state"] or "idle", "cursor": s.get("cursor")}, version  # keepalive tick
+                    return self._frame(s), version  # keepalive tick
                 self.cv.wait(left)
 
     def wait_events(self, after: int, timeout: float) -> list[dict]:
@@ -548,6 +937,17 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return self.send_json(404, {"error": "not found"})
         sid, action = m.group(1), m.group(2)
+        if HUB.is_mirror(sid):
+            # an agent running in a plain terminal, shown from its transcript: look, never touch
+            if method == "GET" and action == "screen":
+                snap = HUB.screen(sid)
+                if snap:
+                    return self.send_json(200, snap)
+                return self.send_json(404, {"error": "no such session"})
+            if method == "GET" and action == "stream":
+                return self.stream_screen(sid)
+            return self.send_json(409, {"error": "read-only",
+                                        "detail": "this agent runs in a plain terminal: start it with `synapse run` to drive it from the phone"})
         if not session_exists(sid):
             return self.send_json(404, {"error": "no such session"})
         if method == "DELETE" and action is None:
@@ -560,7 +960,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(404, {"error": "no such session"})
             snap = HUB.screen(sid)
             return self.send_json(200, {"text": text, "state": snap["state"] if snap else "idle",
-                                        "cursor": cursor_info(sid, lines)})
+                                        "cursor": cursor_info(sid, lines), "readonly": False})
         if method == "GET" and action == "stream":
             return self.stream_screen(sid)
         if method == "POST" and action == "input":
@@ -596,7 +996,7 @@ class Handler(BaseHTTPRequestHandler):
             if snap is None:
                 # just created: the monitor has not seen it yet; only give up if the session is really gone
                 missing += 1
-                if missing > 12 or not session_exists(sid):
+                if missing > 12 or not (session_exists(sid) or HUB.exists(sid)):
                     return
                 time.sleep(0.25)
                 continue
@@ -843,6 +1243,12 @@ def cmd_pair(a) -> None:
             print("(the link itself is not printed, so it does not stay in your scrollback: --show-uri)")
 
 
+def refuse_mirror(sid: str) -> None:
+    if sid.startswith(EXT_PREFIX):
+        sys.exit(f"synapse: '{sid}' is an agent running in a plain terminal (read-only mirror): "
+                 "there is nothing to attach to or kill from here")
+
+
 def cmd_run(a) -> None:
     cwd = a.cwd or os.getcwd()
     s = create_session(a.agent, cwd, a.name, allow_raw_command=True)
@@ -860,7 +1266,8 @@ def cmd_ls(a) -> None:
     if a.json:
         print(json.dumps(sessions))
     for s in ([] if a.json else sessions):
-        print(f"{s['id']:<28} {s['agent']:<8} {s['state']:<12} {s['cwd']}")
+        tag = "  (read-only mirror)" if s.get("readonly") else ""
+        print(f"{s['id']:<28} {s['agent']:<8} {s['state']:<12} {s['cwd']}{tag}")
 
 
 def cmd_revoke(a) -> None:
@@ -959,11 +1366,11 @@ def main() -> None:
 
     s = sub.add_parser("kill", help="kill a session")
     s.add_argument("id")
-    s.set_defaults(fn=lambda a: kill_session(a.id))
+    s.set_defaults(fn=lambda a: (refuse_mirror(a.id), kill_session(a.id)))
 
     s = sub.add_parser("attach", help="attach to a session in this terminal")
     s.add_argument("id")
-    s.set_defaults(fn=lambda a: os.execvp("tmux", ["tmux", "attach", "-t", target(a.id)]))
+    s.set_defaults(fn=lambda a: (refuse_mirror(a.id), os.execvp("tmux", ["tmux", "attach", "-t", target(a.id)])))
 
     s = sub.add_parser("token", help="print (or --rotate) the access token")
     s.add_argument("--rotate", action="store_true")
